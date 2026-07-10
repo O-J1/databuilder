@@ -1,0 +1,112 @@
+# databuilder example config
+
+[runtime]
+work_dir = "/shared/aigc-build/work"     # shared FS on multi-node runs
+data_dir = "/shared/aigc-build/data"     # materialized images live here
+num_workers = 16
+world_size = 8                            # or pass --world-size / WORLD_SIZE / SLURM_NTASKS
+rank = 0                                  # or pass --rank / RANK / SLURM_PROCID
+
+[filters]
+min_longest_side = 256      # delete when the longest side is smaller
+max_tall = "9:23"           # delete when taller (width:height below this)
+max_wide = "23:9"           # delete when wider
+laplacian_min = 2.0         # delete near-flat images
+laplacian_max = 15000.0     # delete extreme noise/texture
+
+[dedup]
+phash_size = 12             # 12x12 = 144-bit perceptual hash
+phash_max_hamming = 8
+colorhash_max_hamming = 6
+
+[embedding]
+model = "facebook/dinov3-vith16plus-pretrain-lvd1689m"   # any DINOv3 size
+batch_size = 64
+devices = "auto"            # "auto" | "cpu" | "cuda:0,cuda:1"
+
+[clustering]
+backend = "auto"            # usearch when available/fits RAM, else sklearn
+aggressiveness = 0.5        # (0,1]: 0.5 ~ sqrt(N) clusters, 1.0 ~ 4*sqrt(N)
+prune_trigger_sigma = 3.0   # examine only clusters sized > mean + sigma*std (extreme outliers)
+semdedup_threshold = 0.96   # inside those, flag members with cosine sim > this to a kept member
+max_ram_gb = 64.0
+
+[balance]
+max_per_generator = 500000  # 0 = no cap; under-represented generators kept in full
+per_generator_cluster_cap = 0
+max_label_ratio = 1.0       # majority label <= minority * ratio; 0 disables
+val_fraction = 0.05
+test_fraction = 0.01
+seed = 42
+emit_csv = true             # refused automatically above 1M rows
+
+[[datasets]]
+name = "openfake"
+repo_id = "ComplexDataLab/OpenFake"
+format = "parquet"
+label = "column:label"        # dataset mixes real+fake
+generator = "column:model"    # per-row generator column
+source_split = "train"        # which HF split to pull
+
+# Columns can also be mapped explicitly. Automatch tries common names first
+# (image/img/picture; label/class/category; generator/model/model_name; split)
+# and HARD ERRORS listing the schema when a required column cannot be matched.
+[[datasets]]
+name = "odd-columns"
+repo_id = "org/odd-parquet"
+format = "parquet"
+label = "auto"                # automatch the label column, error if none
+[datasets.columns]
+image = "jpeg_bytes"          # explicit when automatch cannot find it
+label = "category_v2"
+generator = "producer"
+[datasets.label_map]          # map column values / folder names -> real|fake
+photograph = "real"
+diffusion = "fake"
+
+[[datasets]]
+name = "some-zip-dataset"
+repo_id = "org/zipped-images"
+format = "zip"
+label = "fake"
+generator = "sdxl"            # static generator name
+
+[[datasets]]
+name = "real-photos"
+repo_id = "org/photo-collection"
+format = "imagefolder"
+image_dir = "imgs"            # set when auto-detection cannot find the images
+label = "real"
+generator = "none"
+
+# Local imagefolder datasets are scanned in place and their files are NEVER
+# deleted by default; rejects/duplicates are only recorded in the artifacts.
+# Set allow_delete = true to let filters/dedup physically delete originals.
+[[datasets]]
+name = "my-local-photos"
+path = "/data/my-photos"
+format = "imagefolder"
+label = "folder"
+generator = "folder"
+allow_delete = false
+
+# Local filesystem dataset, scanned IN PLACE (filter/dedup deletions affect the
+# originals -- use --dry-run first). Folder names serve as labels: segments
+# named real/fake/generated/ai/aigc (or label_map entries) are matched up to
+# two levels deep, and the run FAILS IMMEDIATELY at startup if no label
+# folders can be inferred.
+[[datasets]]
+name = "local-mixed"
+path = "D:/aigc-dataset/mixed"    # e.g. mixed/real/... and mixed/fake/sd15/...
+format = "imagefolder"            # local datasets need an explicit format
+label = "folder"
+generator = "folder"              # generator = parent folder (never a label folder)
+
+# Pre-split dataset: force EVERYTHING from it into one output split. Forced
+# val/test datasets bypass balancing caps and cluster pruning.
+[[datasets]]
+name = "holdout-bench"
+path = "D:/aigc-dataset/holdout"
+format = "imagefolder"
+label = "folder"
+assign_split = "test"

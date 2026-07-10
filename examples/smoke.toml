@@ -1,0 +1,52 @@
+[runtime]
+work_dir = "D:/dbuild-smoke/work"
+data_dir = "D:/dbuild-smoke/data"
+num_workers = 8
+world_size = 1
+
+[filters]
+min_longest_side = 256
+
+[embedding]
+model = "facebook/dinov3-vitb16-pretrain-lvd1689m"
+batch_size = 32
+devices = "auto"
+
+[clustering]
+backend = "auto"
+aggressiveness = 0.5        # ~sqrt(5000) ≈ 70 clusters
+
+[balance]
+max_per_generator = 1200    # force balancer to cut, small datasets
+max_label_ratio = 1.0       # trim majority label to <= 1x the minority (real vs fake)
+val_fraction = 0.05
+test_fraction = 0.01
+emit_csv = true
+
+[[datasets]]
+name = "nano-banana"
+repo_id = "SaunakSS/nano-banana-synthetic-images-1500"
+format = "zip"
+label = "fake"
+generator = "nano-banana"
+
+[[datasets]]
+name = "gpt-image"
+repo_id = "Dream000/gpt-image"
+format = "zip"
+label = "fake"
+generator = "gpt-image"
+
+[[datasets]]
+name = "seedream-45"
+repo_id = "ash12321/seedream-4.5-generated-2k"
+format = "imagefolder"
+label = "fake"
+generator = "seedream-4.5"
+
+[[datasets]]
+name = "unsplash-lite"
+path = "E:/datasets/unsplash-research-dataset-lite-latest/photos"
+format = "imagefolder"
+label = "real"
+generator = "none"

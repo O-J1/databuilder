@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "databuilder"
+version = "0.1.0"
+description = "Distributed, config-driven image dataset builder: download, filter, dedup, embed, cluster, balance."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "Pillow>=10.4",
+    "pillow-heif",
+    "pillow-jxl-plugin",
+    "pyarrow>=16",
+    "huggingface-hub>=0.30",
+    "ImageHash>=4.3.1",
+    "opencv-python-headless>=4.9",
+    "scikit-learn>=1.4",
+    "usearch>=2.12",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+embed = ["torch>=2.3", "transformers>=4.45"]
+viz = ["fastapi>=0.110", "uvicorn>=0.29", "umap-learn>=0.5.6"]
+dev = ["pytest>=8", "ruff>=0.5", "httpx>=0.27"]
+
+[project.scripts]
+databuilder = "databuilder.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"databuilder.viz" = ["static/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

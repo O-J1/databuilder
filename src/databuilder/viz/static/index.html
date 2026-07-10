@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>databuilder cluster viewer</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="sidebar">
+    <h1>Clusters</h1>
+    <div id="stats"></div>
+    <div id="controls">
+      <label>color
+        <select id="color-mode">
+          <option value="cluster" selected>cluster</option>
+          <option value="generator">generator</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="hide-pruned"> hide pruned</label>
+    </div>
+    <div id="flag-row">flagged: <span id="flag-count">0</span> &middot; <a href="/api/flags.txt" download>download flags.txt</a></div>
+    <ul id="cluster-list"></ul>
+    <h2 id="examples-title" hidden>Examples</h2>
+    <div id="examples"></div>
+  </div>
+  <div id="main">
+    <div id="tabs">
+      <button class="tab active" data-tab="scatter">Scatter</button>
+      <button class="tab" data-tab="pairs">Pruned pairs</button>
+    </div>
+    <div id="view-wrap">
+      <div id="scatter-view">
+        <canvas id="scatter"></canvas>
+        <div id="tooltip" hidden>
+          <img id="tooltip-img" alt="">
+          <div id="tooltip-text"></div>
+        </div>
+        <div id="legend">drag: pan &middot; wheel: zoom &middot; hover: preview &middot; click thumb: full size &middot; ctrl+click: copy path &middot; alt+click: flag bad &middot; n/p: step clusters &middot; esc: reset view</div>
+      </div>
+      <div id="pairs-view" hidden>
+        <div id="pairs-controls">
+          <label>kind
+            <select id="pairs-kind">
+              <option value="" selected>all</option>
+              <option value="cluster">cluster-pruned</option>
+              <option value="dedup">dedup duplicates</option>
+            </select>
+          </label>
+          <label>cluster
+            <select id="pairs-cluster">
+              <option value="" selected>all</option>
+            </select>
+          </label>
+          <button id="pairs-prev">&larr; prev</button>
+          <span id="pairs-page-label"></span>
+          <button id="pairs-next">next &rarr;</button>
+        </div>
+        <div id="pairs-hint" hidden></div>
+        <div id="pairs-grid"></div>
+        <div id="pairs-legend">left: pruned/removed &middot; right: kept counterpart &middot; click: full size &middot; ctrl+click: copy path &middot; alt+click: flag bad &middot; &larr;/&rarr;: page</div>
+      </div>
+      <div id="toast" hidden></div>
+    </div>
+  </div>
+  <div id="modal" hidden>
+    <img id="modal-img" alt="">
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
