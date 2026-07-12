@@ -147,8 +147,8 @@ def _run_daft(ctx: RunContext) -> None:
     from . import daft_exec
 
     daft = daft_exec.init_runner(ctx.cfg)
-    from daft import col
-    from daft.functions import image_hash, lit, when
+    from daft import col, lit
+    from daft.functions import image_hash, when
     from daft.functions import hash as daft_hash
 
     filters = ctx.cfg.filters

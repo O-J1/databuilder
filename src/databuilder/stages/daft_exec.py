@@ -40,10 +40,10 @@ def init_runner(cfg: Config):
         return daft
     if cfg.daft.runner == "ray":
         address = cfg.daft.ray_address
-        daft.context.set_runner_ray(address=None if address in ("", "auto") else address)
+        daft.set_runner_ray(address=None if address in ("", "auto") else address)
         log.info("daft runner: ray (address=%s)", address or "auto")
     else:
-        daft.context.set_runner_native()
+        daft.set_runner_native()
         log.info("daft runner: native")
     _RUNNER_SET = True
     return daft

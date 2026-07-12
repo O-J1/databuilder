@@ -94,6 +94,45 @@ freely across runs (not within one work_dir stage).
   stage barrier. For embed, set `embedding.concurrency` to the number of model
   replicas (one GPU each) Ray should schedule.
 
+### End-to-end engine benchmark
+
+The standalone benchmark compares the fallback implementation with Daft's
+native runner using the pipeline settings and four sources in
+`examples/smoke.toml`:
+
+```bash
+pip install -e ".[embed]"
+python benchmarks/benchmark_engines.py
+```
+
+The local dataset path configured in `examples/smoke.toml` must exist, the
+benchmark output directory must be writable, and the Hugging Face datasets and
+DINOv3 model must be accessible (and authenticated if required) on the first
+invocation. Setup is deliberately outside the timed interval: the script runs
+the normal download stage against the smoke config's own work/data
+directories (already-materialized data is reused, never re-downloaded),
+samples exactly 125 images from each source with seed 42, copies that fixed
+500-image corpus, and caches the model files. Later invocations reuse and
+hash-validate the corpus; pass `--rebuild-corpus` to sample it again.
+
+Each measurement starts a fresh process and work directory, then times all
+seven stages through the normal `databuilder run` CLI. Three runs are made per
+engine, with their order alternated between rounds. Process and model startup,
+inference, and artifact writes are included in the wall-clock duration; source
+preparation and model download are not. Timed child processes use the local
+model cache in offline mode and are forced to rank 0 with a world size of 1.
+
+Individual timings, mean/min/max values, and
+`fallback mean / Daft mean` are printed. A speedup above 1 means Daft was
+faster. Raw results and run artifacts are retained under
+`.manual/benchmark/`, with the newest result also written to
+`.manual/benchmark/latest.json`. Dedup survivor sets and manifest row counts
+are checked across all six runs so diverging outputs are not presented as
+comparable timings (full manifest contents are not compared: usearch k-means
+is unseeded, so cluster assignments legitimately vary between runs). This
+hardware-dependent benchmark is not part of the normal pytest suite and has no
+pass/fail performance threshold.
+
 ## Cluster viewer
 
 ```bash
