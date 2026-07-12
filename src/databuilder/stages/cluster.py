@@ -113,6 +113,11 @@ def _fit_usearch(store: ParquetEmbeddingStore, k: int, seed: int) -> np.ndarray:
     matrix = np.concatenate([mat for _, mat in store.iter_batches(batch_rows=65_536)])
     result = kmeans(matrix, k)
     centroids = getattr(result, "centroids", None)
+    if centroids is None and isinstance(result, tuple):
+        # newer usearch returns (assignments, distances, centroids)
+        centroids = next((part for part in result if np.ndim(part) == 2), None)
+        if centroids is None:
+            result = result[0]  # fall through to assignments handling
     if centroids is None:
         assignments = np.asarray(result, dtype=np.int64).reshape(-1)
         centroids = np.zeros((k, matrix.shape[1]), dtype=np.float64)

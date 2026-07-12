@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import hashlib
 import io
 import logging
 from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import pyarrow as pa
+import xxhash
 
 from ..state import RunContext
 from ..utils import ParquetShardWriter, iter_parquet_batches
@@ -18,7 +18,7 @@ log = logging.getLogger("databuilder.fingerprint")
 FINGERPRINT_SCHEMA = pa.schema(
     list(KEPT_SCHEMA)
     + [
-        ("md5", pa.binary(16)),
+        ("file_hash", pa.uint64()),
         ("phash", pa.binary()),
         ("colorhash", pa.binary()),
         ("laplacian", pa.float64()),
@@ -42,7 +42,7 @@ def _pack_hash(hash_obj) -> bytes:
 
 
 def _fingerprint(abs_path: str) -> dict:
-    """Full-decode pass: md5 + 12x12 phash + colorhash + Laplacian variance."""
+    """Full-decode pass: xxh3 file hash + 12x12 phash + colorhash + Laplacian variance."""
     import cv2
     import imagehash
     from PIL import Image
@@ -50,7 +50,7 @@ def _fingerprint(abs_path: str) -> dict:
     try:
         with open(abs_path, "rb") as handle:
             data = handle.read()
-        md5 = hashlib.md5(data).digest()
+        file_hash = xxhash.xxh3_64_intdigest(data)
         with Image.open(io.BytesIO(data)) as img:
             img = img.convert("RGB")
             if max(img.size) > LAPLACIAN_MAX_SIDE:
@@ -60,7 +60,7 @@ def _fingerprint(abs_path: str) -> dict:
             phash = _pack_hash(imagehash.phash(img, hash_size=_PHASH_SIZE))
             colorhash = _pack_hash(imagehash.colorhash(img))
         return {
-            "md5": md5,
+            "file_hash": file_hash,
             "phash": phash,
             "colorhash": colorhash,
             "laplacian": laplacian,
@@ -71,6 +71,13 @@ def _fingerprint(abs_path: str) -> dict:
 
 
 def run(ctx: RunContext) -> None:
+    if ctx.cfg.daft.enabled:
+        _run_daft(ctx)
+    else:
+        _run_legacy(ctx)
+
+
+def _run_legacy(ctx: RunContext) -> None:
     filters = ctx.cfg.filters
     roots = dataset_roots(ctx.cfg)
     protected = protected_datasets(ctx.cfg)
@@ -113,7 +120,7 @@ def run(ctx: RunContext) -> None:
                 kept.append(
                     {
                         **row,
-                        "md5": result["md5"],
+                        "file_hash": result["file_hash"],
                         "phash": result["phash"],
                         "colorhash": result["colorhash"],
                         "laplacian": result["laplacian"],
@@ -127,3 +134,73 @@ def run(ctx: RunContext) -> None:
             flush()
 
     log.info("[rank %d] fingerprint done: %s%s", ctx.rank, stats, " (dry-run)" if ctx.dry_run else "")
+
+
+def _run_daft(ctx: RunContext) -> None:
+    """Daft execution path: xxh3 + phash/colorhash in Rust, Laplacian as a UDF.
+
+    With the native runner each rank processes its own headerscan shard; with
+    the ray runner rank 0 submits every shard to the Ray cluster. Heavy image
+    columns are dropped before results stream back to this process, which
+    writes the same artifacts as the legacy path.
+    """
+    from . import daft_exec
+
+    daft = daft_exec.init_runner(ctx.cfg)
+    from daft import col
+    from daft.functions import image_hash, lit, when
+    from daft.functions import hash as daft_hash
+
+    filters = ctx.cfg.filters
+    roots = dataset_roots(ctx.cfg)
+    protected = protected_datasets(ctx.cfg)
+    hs_dir = ctx.artifact_dir("headerscan")
+    if ctx.cfg.daft.runner == "ray":
+        in_paths = sorted(str(p) for p in hs_dir.glob("rank_*.kept.parquet"))
+    else:
+        in_paths = [str(hs_dir / f"rank_{ctx.rank:05d}.kept.parquet")]
+    out_dir = ctx.artifact_dir("fingerprint")
+
+    laplacian_var = daft_exec.make_laplacian_udf(daft, LAPLACIAN_MAX_SIDE)
+
+    df = daft.read_parquet(in_paths)
+    df = daft_exec.with_downloaded_image(daft, df, roots)
+    df = df.with_column("file_hash", daft_hash(col("data"), hash_function="xxhash3_64"))
+    df = df.with_column(
+        "phash", image_hash(col("image"), method="phash", hash_size=ctx.cfg.dedup.phash_size)
+    )
+    df = df.with_column("colorhash", image_hash(col("image"), method="colorhash", binbits=3))
+    df = df.with_column("laplacian", laplacian_var(col("image")))
+    df = df.with_column(
+        "reason",
+        when(col("image").is_null(), lit("broken_decode"))
+        .when(col("laplacian") < filters.laplacian_min, lit("laplacian_low"))
+        .when(col("laplacian") > filters.laplacian_max, lit("laplacian_high"))
+        .otherwise(lit("")),
+    )
+
+    kept_cols = [field.name for field in FINGERPRINT_SCHEMA]
+    result = df.select(*kept_cols, "reason")  # drops data/image before collection
+
+    kept = ParquetShardWriter(out_dir / f"rank_{ctx.rank:05d}.parquet", FINGERPRINT_SCHEMA)
+    removed = ParquetShardWriter(out_dir / f"rank_{ctx.rank:05d}.removed.parquet", REMOVED_SCHEMA)
+    stats = {"kept": 0, "broken": 0, "laplacian_low": 0, "laplacian_high": 0}
+    with kept, removed:
+        for row in result.iter_rows():
+            reason = row.pop("reason")
+            if not reason:
+                kept.append(row)
+                stats["kept"] += 1
+                continue
+            stats["broken" if reason == "broken_decode" else reason] += 1
+            removed.append({"path": row["path"], "dataset": row["dataset"], "reason": reason})
+            if row["dataset"] not in protected:
+                ctx.remove_file(resolve_abs_from_roots(roots, row["path"]))
+
+    log.info(
+        "[rank %d] fingerprint (daft/%s) done: %s%s",
+        ctx.rank,
+        ctx.cfg.daft.runner,
+        stats,
+        " (dry-run)" if ctx.dry_run else "",
+    )

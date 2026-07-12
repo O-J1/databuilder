@@ -38,8 +38,31 @@ def test_minimal_config_defaults(tmp_path):
     assert cfg.dedup.phash_size == 12
     assert cfg.clustering.backend == "auto"
     assert cfg.balance.emit_csv is True
+    assert cfg.daft.enabled is False
+    assert cfg.daft.runner == "native"
+    assert cfg.embedding.concurrency == 0
     assert cfg.datasets[0].name == "ds1"
     assert CSV_MAX_ROWS == 1_000_000
+
+
+def test_daft_section(tmp_path):
+    text = MINIMAL + '\n[daft]\nenabled = true\nrunner = "ray"\nray_address = "ray://head:10001"\n'
+    cfg = load_config(_write(tmp_path, text))
+    assert cfg.daft.enabled is True
+    assert cfg.daft.runner == "ray"
+    assert cfg.daft.ray_address == "ray://head:10001"
+
+
+def test_daft_bad_runner_rejected(tmp_path):
+    text = MINIMAL + '\n[daft]\nrunner = "spark"\n'
+    with pytest.raises(ConfigError, match="daft.runner"):
+        load_config(_write(tmp_path, text))
+
+
+def test_negative_embedding_concurrency_rejected(tmp_path):
+    text = MINIMAL + "\n[embedding]\nconcurrency = -1\n"
+    with pytest.raises(ConfigError, match="concurrency"):
+        load_config(_write(tmp_path, text))
 
 
 def test_runtime_overrides(tmp_path):

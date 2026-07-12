@@ -1,7 +1,7 @@
 # databuilder
 
 Config-driven, distributed image dataset builder. Downloads HuggingFace datasets,
-filters (size / aspect / broken / Laplacian), deduplicates (md5 + 12x12 phash +
+filters (size / aspect / broken / Laplacian), deduplicates (xxh3 + 12x12 phash +
 colorhash), embeds with DINOv3, clusters with usearch k-means, prunes
 over-represented clusters, and emits a generator- and cluster-balanced manifest.
 
@@ -19,11 +19,14 @@ pip install -e "./databuilder[viz]"    # + FastAPI/uvicorn/umap for the viewer
 |---|--------------|-----------|--------------|
 | 1 | `download`   | per node  | HF snapshot + materialize (parquet bytes / zip / imagefolder) |
 | 2 | `headerscan` | per node  | delete: longest side < min, broken headers, aspect beyond 9:23 / 23:9 |
-| 3 | `fingerprint`| per node  | one decode: Laplacian filter + md5 + phash + colorhash |
+| 3 | `fingerprint`| per node* | one decode: Laplacian filter + xxh3 + phash + colorhash |
 | 4 | `dedup`      | rank 0    | global exact + near-duplicate delete (keep highest res, then largest file) |
-| 5 | `embed`      | per node  | DINOv3 embeddings -> parquet shards (fp16) per GPU |
+| 5 | `embed`      | per node* | DINOv3 embeddings -> parquet shards (fp16) per GPU |
 | 6 | `cluster`    | rank 0    | usearch/sklearn k-means; flag over-represented members (never deletes) |
 | 7 | `manifest`   | rank 0    | balanced manifest; parquet always, CSV refused above 1M rows |
+
+\* With `[daft] enabled = true` and `runner = "ray"`, fingerprint and embed run
+from rank 0 on a Ray cluster instead (see [Daft execution path](#daft-execution-path)).
 
 ## Single machine
 
@@ -75,6 +78,22 @@ Do not pin `rank` in the TOML for SLURM runs — the auto-detected values
 override the config, but leaving it unset avoids confusion. Re-submitting the
 same job resumes from the last completed stage.
 
+## Daft execution path
+
+With `pip install "databuilder[daft]"` and `[daft] enabled = true`, the
+fingerprint and embed stages run on [Daft](https://docs.daft.ai): file hashing
+(xxh3), perceptual hashing (12x12 phash + colorhash), and image decoding run in
+Daft's Rust kernels; HEIC/AVIF/JXL fall back to Pillow plugins automatically.
+Artifacts are byte-compatible with the default path, so the two can be mixed
+freely across runs (not within one work_dir stage).
+
+- `runner = "native"` — each SLURM rank runs Daft locally on its own shard;
+  topology and barriers are unchanged.
+- `runner = "ray"` — rank 0 submits the whole stage to an existing Ray cluster
+  (`ray_address = "auto"` or `"ray://head:10001"`); the other ranks wait at the
+  stage barrier. For embed, set `embedding.concurrency` to the number of model
+  replicas (one GPU each) Ray should schedule.
+
 ## Cluster viewer
 
 ```bash
@@ -104,7 +123,9 @@ See [examples/build.example.toml](examples/build.example.toml). Key sections:
 - `[runtime]` - `work_dir`, `data_dir`, `num_workers`, `world_size`/`rank`
 - `[filters]` - `min_longest_side`, `max_tall = "9:23"`, `max_wide = "23:9"`, `laplacian_min/max`
 - `[dedup]` - `phash_size = 12`, `phash_max_hamming`, `colorhash_max_hamming`
-- `[embedding]` - DINOv3 `model` id (any size), `batch_size`, `devices = "auto"`
+- `[embedding]` - DINOv3 `model` id (any size), `batch_size`, `devices = "auto"`,
+  `concurrency` (Daft runner only: model replicas, one GPU each)
+- `[daft]` - `enabled`, `runner = "native"|"ray"`, `ray_address` (see below)
 - `[clustering]` - `aggressiveness` (0..1; 0.5 = ~sqrt(N) clusters, 1.0 = ~4x more)
   or explicit `k`; `prune_trigger_sigma` (only clusters sized above
   mean + sigma*std are examined for pruning) and `semdedup_threshold` (inside

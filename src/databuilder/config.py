@@ -10,6 +10,7 @@ CSV_MAX_ROWS = 1_000_000
 
 DATASET_FORMATS = {"auto", "parquet", "zip", "imagefolder"}
 CLUSTER_BACKENDS = {"auto", "usearch", "sklearn"}
+DAFT_RUNNERS = {"native", "ray"}
 COLUMN_ROLES = {"image", "label", "generator", "split"}
 SPLIT_NAMES = {"train", "val", "test"}
 
@@ -98,6 +99,29 @@ class EmbeddingConfig:
     dtype: str = "float16"
     devices: str = "auto"
     flush_rows: int = 20_000
+    concurrency: int = 0  # daft runner only: number of model replicas (0 = auto)
+
+    def __post_init__(self) -> None:
+        if self.concurrency < 0:
+            raise ConfigError("embedding.concurrency must be >= 0 (0 means auto)")
+
+
+@dataclass(frozen=True)
+class DaftConfig:
+    """Optional Daft execution path for the fingerprint and embed stages.
+
+    runner "native" keeps the per-rank SLURM sharding and runs Daft locally on
+    each node; runner "ray" submits the whole stage to a Ray cluster from
+    rank 0 while the other ranks wait at the stage barrier.
+    """
+
+    enabled: bool = False
+    runner: str = "native"
+    ray_address: str = "auto"
+
+    def __post_init__(self) -> None:
+        if self.runner not in DAFT_RUNNERS:
+            raise ConfigError(f"daft.runner must be one of {sorted(DAFT_RUNNERS)}")
 
 
 @dataclass(frozen=True)
@@ -248,6 +272,7 @@ class Config:
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     clustering: ClusteringConfig = field(default_factory=ClusteringConfig)
     balance: BalanceConfig = field(default_factory=BalanceConfig)
+    daft: DaftConfig = field(default_factory=DaftConfig)
     datasets: tuple[DatasetConfig, ...] = ()
 
 
@@ -286,6 +311,7 @@ def load_config(path: Path | str, overrides: dict[str, Any] | None = None) -> Co
         "embedding": EmbeddingConfig,
         "clustering": ClusteringConfig,
         "balance": BalanceConfig,
+        "daft": DaftConfig,
     }
     parsed: dict[str, Any] = {}
     for key, cls in sections.items():

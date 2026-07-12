@@ -186,7 +186,7 @@ def test_prepare_pairs_dedup_and_old_schema(make_ctx):
                 "image_id": 111,
                 "path": "ds1/gen_a/dupe1.png",
                 "dataset": "ds1",
-                "reason": "duplicate_md5",
+                "reason": "duplicate_exact",
                 "kept_image_id": rows[0]["image_id"],
             },
             {
@@ -243,7 +243,7 @@ def test_viz_server_pairs_endpoints(make_ctx):
                 "image_id": 111,
                 "path": "ds1/gen_a/dupe1.png",
                 "dataset": "ds1",
-                "reason": "duplicate_md5",
+                "reason": "duplicate_exact",
                 "kept_image_id": rows[0]["image_id"],
             },
             {

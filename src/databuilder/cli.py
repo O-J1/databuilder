@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .config import ConfigError, load_config
 from .stages.common import validate_local_datasets
-from .state import RANK0_STAGES, REQUIRES, STAGES, RunContext
+from .state import REQUIRES, STAGES, RunContext
 
 log = logging.getLogger("databuilder")
 
@@ -97,7 +97,7 @@ def _execute(ctx: RunContext, name: str) -> None:
 def cmd_run(args: argparse.Namespace) -> int:
     ctx = _make_context(args)
     for name in STAGES:
-        if name in RANK0_STAGES and ctx.rank != 0:
+        if ctx.is_rank0_stage(name) and ctx.rank != 0:
             continue
         for req in REQUIRES[name]:
             ctx.wait_for(req)
@@ -109,7 +109,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_stage(args: argparse.Namespace) -> int:
     ctx = _make_context(args)
     name = args.name
-    if name in RANK0_STAGES and ctx.rank != 0:
+    if ctx.is_rank0_stage(name) and ctx.rank != 0:
         raise SystemExit(f"Stage {name!r} only runs on rank 0 (this is rank {ctx.rank}).")
     for req in REQUIRES[name]:
         if args.wait:

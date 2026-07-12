@@ -36,9 +36,16 @@ REMOVED_SCHEMA = pa.schema(
     [("path", pa.string()), ("dataset", pa.string()), ("reason", pa.string())]
 )
 BATCH = 4096
+# Generous ceiling for legitimate ultra-high-res photos (~1.5 GB decoded RGB).
+# PIL's default warns at ~89M pixels and hard-fails at ~179M, which real
+# datasets exceed; keep a finite bound as decompression-bomb protection.
+MAX_IMAGE_PIXELS = 512_000_000
 
 
 def _init_worker() -> None:
+    from PIL import Image
+
+    Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
     try:
         import pillow_heif
 

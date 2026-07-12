@@ -29,28 +29,30 @@ NEIGHBORS = 16
 def run(ctx: RunContext) -> None:
     """Global exact + near duplicate removal (rank 0 only).
 
+    Exact duplicates are keyed on (xxh3 file hash, filesize); the filesize
+    guards the 64-bit hash against birthday collisions at large scale.
     Keep-best order inside a duplicate group: highest resolution, then largest
     file size, then smallest image_id (deterministic).
-    Memory note: holds one md5->best mapping plus packed phash/colorhash arrays
-    for all surviving images; ~60 bytes per image.
+    Memory note: holds one exact-key->best mapping plus packed phash/colorhash
+    arrays for all surviving images; ~60 bytes per image.
     """
     fp_dir = ctx.artifact_dir("fingerprint")
     fp_files = sorted(fp_dir.glob("rank_*.parquet"))
     fp_files = [f for f in fp_files if not f.name.endswith(".removed.parquet")]
     out_dir = ctx.artifact_dir("dedup")
 
-    # Pass 1: best row per md5.
-    best: dict[bytes, tuple[int, int, int]] = {}
+    # Pass 1: best row per exact-duplicate key.
+    best: dict[tuple[int, int], tuple[int, int, int]] = {}
     for batch in iter_parquet_batches(
-        fp_files, columns=["image_id", "md5", "width", "height", "filesize"]
+        fp_files, columns=["image_id", "file_hash", "width", "height", "filesize"]
     ):
         for row in batch.to_pylist():
-            key = row["md5"]
+            key = (row["file_hash"], row["filesize"])
             rank_key = (row["width"] * row["height"], row["filesize"], -row["image_id"])
             if key not in best or rank_key > best[key]:
                 best[key] = rank_key
 
-    # Pass 2: collect md5 winners' hashes for near-duplicate search.
+    # Pass 2: collect exact-dup winners' hashes for near-duplicate search.
     ids: list[np.ndarray] = []
     res: list[np.ndarray] = []
     sizes: list[np.ndarray] = []
@@ -58,10 +60,10 @@ def run(ctx: RunContext) -> None:
     colorhashes: list[np.ndarray] = []
     for batch in iter_parquet_batches(
         fp_files,
-        columns=["image_id", "md5", "width", "height", "filesize", "phash", "colorhash"],
+        columns=["image_id", "file_hash", "width", "height", "filesize", "phash", "colorhash"],
     ):
         rows = batch.to_pylist()
-        keep = [r for r in rows if best[r["md5"]][2] == -r["image_id"]]
+        keep = [r for r in rows if best[(r["file_hash"], r["filesize"])][2] == -r["image_id"]]
         if not keep:
             continue
         ids.append(np.array([r["image_id"] for r in keep], dtype=np.uint64))
@@ -96,14 +98,15 @@ def run(ctx: RunContext) -> None:
     protected = protected_datasets(ctx.cfg)
     survivors = ParquetShardWriter(out_dir / "survivors.parquet", FINGERPRINT_SCHEMA)
     removed = ParquetShardWriter(out_dir / "removed.parquet", REMOVED_SCHEMA)
-    stats = {"kept": 0, "duplicate_md5": 0, "duplicate_phash": 0}
+    stats = {"kept": 0, "duplicate_exact": 0, "duplicate_phash": 0}
     with survivors, removed:
         for batch in iter_parquet_batches(fp_files):
             for row in batch.to_pylist():
-                if best[row["md5"]][2] != -row["image_id"]:
-                    reason = "duplicate_md5"
-                    # the md5 winner may itself have lost the phash round
-                    kept_id = -best[row["md5"]][2]
+                exact_key = (row["file_hash"], row["filesize"])
+                if best[exact_key][2] != -row["image_id"]:
+                    reason = "duplicate_exact"
+                    # the exact-dup winner may itself have lost the phash round
+                    kept_id = -best[exact_key][2]
                     kept_id = near_losers.get(kept_id, kept_id)
                 elif row["image_id"] in near_losers:
                     reason = "duplicate_phash"

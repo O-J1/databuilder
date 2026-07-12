@@ -19,11 +19,14 @@ dependencies = [
     "opencv-python-headless>=4.9",
     "scikit-learn>=1.4",
     "usearch>=2.12",
+    "xxhash>=3.4",
     "tqdm>=4.66",
+    "huggingface-hub>=1.21.0",
+    "daft>=0.7.19"
 ]
 
 [project.optional-dependencies]
-embed = ["torch>=2.3", "transformers>=4.45"]
+embed = ["torch>=2.12", "transformers>=4.45"]
 viz = ["fastapi>=0.110", "uvicorn>=0.29", "umap-learn>=0.5.6"]
 dev = ["pytest>=8", "ruff>=0.5", "httpx>=0.27"]
 
@@ -35,6 +38,19 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "databuilder.viz" = ["static/*"]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [tool.ruff]
 line-length = 100

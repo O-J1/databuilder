@@ -27,7 +27,7 @@ def test_fingerprint_flags_flat_images(make_ctx):
 
     kept = pq.read_table(ctx.artifact_dir("fingerprint") / "rank_00000.parquet").to_pylist()
     assert [row["path"] for row in kept] == ["ds1/g/textured.png"]
-    assert len(kept[0]["md5"]) == 16
+    assert isinstance(kept[0]["file_hash"], int)  # xxh3_64 of the file bytes
     assert len(kept[0]["phash"]) == 18  # 12x12 bits packed
     removed = pq.read_table(
         ctx.artifact_dir("fingerprint") / "rank_00000.removed.parquet"
@@ -39,7 +39,7 @@ def test_fingerprint_flags_flat_images(make_ctx):
 def test_dedup_keeps_highest_resolution(make_ctx):
     ctx = make_ctx(datasets=(DS,), filters=NO_LAPLACIAN)
     base = save_image(ctx.data_dir / "ds1" / "g" / "circle.png", kind="circle", size=(400, 400))
-    # exact duplicate (same bytes, same md5)
+    # exact duplicate (same bytes, same file hash)
     shutil.copyfile(base, ctx.data_dir / "ds1" / "g" / "circle_copy.png")
     # near duplicate at higher resolution (same structure -> close phash)
     save_image(ctx.data_dir / "ds1" / "g" / "circle_big.png", kind="circle", size=(600, 600))
@@ -57,7 +57,7 @@ def test_dedup_keeps_highest_resolution(make_ctx):
     removed = pq.read_table(ctx.artifact_dir("dedup") / "removed.parquet").to_pylist()
     reasons = {row["path"].rsplit("/", 1)[-1] for row in removed}
     assert reasons == {"circle.png", "circle_copy.png"}
-    # every removed row links to the surviving big circle (transitively for md5 losers)
+    # every removed row links to the surviving big circle (transitively for exact losers)
     big_id = next(
         row["image_id"] for row in survivors if row["path"] == "ds1/g/circle_big.png"
     )

@@ -13,6 +13,7 @@ from databuilder.config import (  # noqa: E402
     BalanceConfig,
     ClusteringConfig,
     Config,
+    DaftConfig,
     DatasetConfig,
     DedupConfig,
     FiltersConfig,
@@ -29,6 +30,7 @@ def make_ctx(tmp_path):
         clustering: ClusteringConfig | None = None,
         balance: BalanceConfig | None = None,
         dedup: DedupConfig | None = None,
+        daft: DaftConfig | None = None,
         dry_run: bool = False,
         world_size: int = 1,
         rank: int = 0,
@@ -42,6 +44,8 @@ def make_ctx(tmp_path):
             kwargs["balance"] = balance
         if dedup is not None:
             kwargs["dedup"] = dedup
+        if daft is not None:
+            kwargs["daft"] = daft
         cfg = Config(
             runtime=RuntimeConfig(
                 work_dir=tmp_path / "work",
@@ -123,7 +127,7 @@ def build_synthetic_artifacts(ctx, n_per_cluster=20, dim=8, generators=("gen_a",
                     "width": 400,
                     "height": 400,
                     "filesize": 1000 + index,
-                    "md5": index.to_bytes(16, "big"),
+                    "file_hash": index,
                     "phash": bytes(18),
                     "colorhash": bytes(6),
                     "laplacian": 10.0,

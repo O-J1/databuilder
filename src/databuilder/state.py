@@ -12,6 +12,9 @@ log = logging.getLogger("databuilder")
 
 STAGES = ("download", "headerscan", "fingerprint", "dedup", "embed", "cluster", "manifest")
 RANK0_STAGES = frozenset({"dedup", "cluster", "manifest"})
+# With the daft ray runner, rank 0 submits these stages to the Ray cluster and
+# the remaining ranks only wait at the stage barrier.
+DAFT_RAY_STAGES = frozenset({"fingerprint", "embed"})
 REQUIRES: dict[str, tuple[str, ...]] = {
     "download": (),
     "headerscan": ("download",),
@@ -55,21 +58,28 @@ class RunContext:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def is_rank0_stage(self, stage: str) -> bool:
+        """Stages that run on rank 0 only (globally, not per-rank sharded)."""
+        if stage in RANK0_STAGES:
+            return True
+        daft = self.cfg.daft
+        return daft.enabled and daft.runner == "ray" and stage in DAFT_RAY_STAGES
+
     def marker(self, stage: str, rank: int) -> Path:
         return self.work_dir / "state" / stage / f"rank_{rank:05d}.SUCCESS"
 
     def expected_ranks(self, stage: str) -> int:
-        return 1 if stage in RANK0_STAGES else self.world_size
+        return 1 if self.is_rank0_stage(stage) else self.world_size
 
     def rank_done(self, stage: str) -> bool:
-        rank = 0 if stage in RANK0_STAGES else self.rank
+        rank = 0 if self.is_rank0_stage(stage) else self.rank
         return self.marker(stage, rank).exists()
 
     def stage_complete(self, stage: str) -> bool:
         return all(self.marker(stage, r).exists() for r in range(self.expected_ranks(stage)))
 
     def mark_success(self, stage: str) -> None:
-        rank = 0 if stage in RANK0_STAGES else self.rank
+        rank = 0 if self.is_rank0_stage(stage) else self.rank
         path = self.marker(stage, rank)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"{time.time():.0f}\n", encoding="utf-8")

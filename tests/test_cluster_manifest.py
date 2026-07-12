@@ -167,7 +167,7 @@ def test_manifest_balances_generators(make_ctx):
         assert row["label"] == 1
         assert row["split"] in {"train", "val"}
         assert row["cluster_id"] in {0, 1}
-        assert len(row["md5"]) == 32  # hex
+        assert len(row["file_hash"]) == 16  # zero-padded xxh3_64 hex
     assert per_generator == {"gen_a": 5, "gen_b": 5}
     assert (ctx.artifact_dir("manifest") / "manifest.csv").exists()
 

@@ -26,7 +26,7 @@ MANIFEST_SCHEMA = pa.schema(
         ("height", pa.int32()),
         ("cluster_id", pa.int32()),
         ("image_id", pa.uint64()),
-        ("md5", pa.string()),
+        ("file_hash", pa.string()),
         ("laplacian", pa.float64()),
     ]
 )
@@ -262,7 +262,7 @@ def run(ctx: RunContext) -> None:
                     "height": row["height"],
                     "cluster_id": cluster_id,
                     "image_id": image_id,
-                    "md5": row["md5"].hex(),
+                    "file_hash": f"{row['file_hash']:016x}",
                     "laplacian": row["laplacian"],
                 }
                 writer.append(record)

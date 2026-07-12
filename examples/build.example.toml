@@ -23,6 +23,13 @@ colorhash_max_hamming = 6
 model = "facebook/dinov3-vith16plus-pretrain-lvd1689m"   # any DINOv3 size
 batch_size = 64
 devices = "auto"            # "auto" | "cpu" | "cuda:0,cuda:1"
+# concurrency = 8           # daft runner only: model replicas across the cluster (0 = auto)
+
+[daft]
+enabled = false             # opt into the Daft execution path for fingerprint + embed
+runner = "native"           # "native": Daft runs locally on each SLURM rank
+                            # "ray": rank 0 submits the stage to a Ray cluster
+ray_address = "auto"        # Ray address for runner = "ray" (e.g. "ray://head:10001")
 
 [clustering]
 backend = "auto"            # usearch when available/fits RAM, else sklearn
