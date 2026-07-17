@@ -131,17 +131,27 @@ def _make_embed_udf(daft, model: str, image_size: int, batch_size: int, use_gpu:
     )
     class DinoEmbed:
         def __init__(self):
+            import importlib
             import torch
-            from transformers import AutoImageProcessor, AutoModel
+
+            # Daft's UDF worker process has an isolated import context that breaks
+            # transformers 5.x lazy-loading (__getattr__ on the top-level module is
+            # never called). Use importlib to load the concrete submodules directly.
+            _processing_auto = importlib.import_module(
+                "transformers.models.auto.processing_auto"
+            )
+            _modeling_auto = importlib.import_module(
+                "transformers.models.auto.modeling_auto"
+            )
+            AutoProcessor = getattr(_processing_auto, "AutoProcessor")
+            AutoModel = getattr(_modeling_auto, "AutoModel")
 
             self.torch = torch
             use_cuda = use_gpu and torch.cuda.is_available()
             self.device = "cuda" if use_cuda else "cpu"
-            dtype = torch.float16 if use_cuda else torch.float32
-            self.processor = AutoImageProcessor.from_pretrained(model)
-            self.model = (
-                AutoModel.from_pretrained(model, dtype=dtype).to(self.device).eval()
-            )
+            self.dtype = torch.float16 if use_cuda else torch.float32
+            self.processor = AutoProcessor.from_pretrained(model)
+            self.model = AutoModel.from_pretrained(model).to(self.device).to(self.dtype).eval()
             self.size_kwargs = (
                 {"size": {"height": image_size, "width": image_size}} if image_size else {}
             )
@@ -154,7 +164,12 @@ def _make_embed_udf(daft, model: str, image_size: int, batch_size: int, use_gpu:
                 return out
             batch = [np.asarray(arrays[i]) for i in idx]
             inputs = self.processor(images=batch, return_tensors="pt", **self.size_kwargs)
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            inputs = {
+                k: v.to(self.device).to(self.dtype)
+                if v.is_floating_point()
+                else v.to(self.device)
+                for k, v in inputs.items()
+            }
             with self.torch.inference_mode():
                 outputs = self.model(**inputs)
             pooled = getattr(outputs, "pooler_output", None)
@@ -243,14 +258,14 @@ def _run_daft(ctx: RunContext, survivors) -> None:
 def _embed_worker(spec: _WorkerSpec) -> None:
     import torch
     from PIL import Image
-    from transformers import AutoImageProcessor, AutoModel
+    from transformers import AutoProcessor, AutoModel
 
     from ..store import EmbeddingShardWriter
 
     _init_image_plugins()
     use_cuda = spec.device.startswith("cuda")
     dtype = torch.float16 if use_cuda else torch.float32
-    processor = AutoImageProcessor.from_pretrained(spec.model)
+    processor = AutoProcessor.from_pretrained(spec.model)
     model = AutoModel.from_pretrained(spec.model, dtype=dtype).to(spec.device).eval()
     size_kwargs = (
         {"size": {"height": spec.image_size, "width": spec.image_size}}
