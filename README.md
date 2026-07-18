@@ -1,11 +1,9 @@
 # databuilder
 
-Config-driven, distributed image dataset builder. Downloads HuggingFace datasets,
-filters (size / aspect / broken / Laplacian), deduplicates (xxh3 + 12x12 phash +
-colorhash), embeds with DINOv3, clusters with usearch k-means, prunes
-over-represented clusters, and emits a generator- and cluster-balanced manifest.
+Config-driven, distributed image dataset builder. Downloads HF datasets,
+filters, deupes, then clusters embeds with DINOv3 + usearch k-means and then prunes over represented clusters. Emits a generator and cluster-balanced manifest.
 
-Self-contained library: install into any venv/uv/pixi environment, no admin needed.
+Self-contained library.
 
 ```bash
 pip install -e ./databuilder            # core pipeline
@@ -18,8 +16,8 @@ pip install -e "./databuilder[viz]"    # + FastAPI/uvicorn/umap for the viewer
 | # | Stage        | Scope     | What it does |
 |---|--------------|-----------|--------------|
 | 1 | `download`   | per node  | HF snapshot + materialize (parquet bytes / zip / imagefolder) |
-| 2 | `headerscan` | per node  | delete: longest side < min, broken headers, aspect beyond 9:23 / 23:9 |
-| 3 | `fingerprint`| per node* | one decode: Laplacian filter + xxh3 + phash + colorhash |
+| 2 | `headerscan` | per node  | delete: longest side < min, broken headers, aspect beyond 9:23 / 23:9, broken files |
+| 3 | `fingerprint`| per node* | one decode: Laplacian filter + xxh3 + phash (12x12) + colorhash |
 | 4 | `dedup`      | rank 0    | global exact + near-duplicate delete (keep highest res, then largest file) |
 | 5 | `embed`      | per node* | DINOv3 embeddings -> parquet shards (fp16) per GPU |
 | 6 | `cluster`    | rank 0    | usearch/sklearn k-means; flag over-represented members (never deletes) |
