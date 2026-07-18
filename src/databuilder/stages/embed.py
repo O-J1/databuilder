@@ -13,6 +13,28 @@ from .headerscan import _init_worker as _init_image_plugins
 
 log = logging.getLogger("databuilder.embed")
 
+def _resolve_model_dtype(torch, dtype_name: str, device: str):
+    """Resolve the configured inference dtype for a specific device."""
+    if not device.startswith("cuda"):
+        return torch.float32
+
+    return {
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }[dtype_name]
+
+
+def _move_model_inputs(inputs, device: str, model_dtype):
+    """Move processor outputs to the model device and matching dtype."""
+    return {
+        name: (
+            value.to(device=device, dtype=model_dtype)
+            if value.is_floating_point()
+            else value.to(device=device)
+        )
+        for name, value in inputs.items()
+    }
+
 
 @dataclass(frozen=True)
 class _WorkerSpec:
@@ -20,6 +42,7 @@ class _WorkerSpec:
     roots: dict
     out_path: str
     model: str
+    dtype: str
     device: str
     batch_size: int
     image_size: int
@@ -51,6 +74,7 @@ def run(ctx: RunContext) -> None:
             roots=dataset_roots(ctx.cfg),
             out_path=str(out_dir / f"rank_{ctx.rank:05d}_dev{i}.parquet"),
             model=ctx.cfg.embedding.model,
+            dtype=ctx.cfg.embedding.dtype,
             device=device,
             batch_size=ctx.cfg.embedding.batch_size,
             image_size=ctx.cfg.embedding.image_size,
@@ -121,7 +145,14 @@ def _daft_concurrency(cfg, use_gpu: bool) -> int:
     return 1
 
 
-def _make_embed_udf(daft, model: str, image_size: int, batch_size: int, use_gpu: bool):
+def _make_embed_udf(
+    daft,
+    model: str,
+    image_size: int,
+    batch_size: int,
+    dtype_name: str,
+    use_gpu: bool,
+):
     """Class UDF holding one model replica; daft schedules `concurrency` copies."""
 
     @daft.udf(
@@ -135,15 +166,30 @@ def _make_embed_udf(daft, model: str, image_size: int, batch_size: int, use_gpu:
             from transformers import AutoImageProcessor, AutoModel
 
             self.torch = torch
+
             use_cuda = use_gpu and torch.cuda.is_available()
             self.device = "cuda" if use_cuda else "cpu"
-            dtype = torch.float16 if use_cuda else torch.float32
+            requested_dtype = _resolve_model_dtype(
+                torch,
+                dtype_name,
+                self.device,
+            )
+
             self.processor = AutoImageProcessor.from_pretrained(model)
             self.model = (
-                AutoModel.from_pretrained(model, dtype=dtype).to(self.device).eval()
+                AutoModel.from_pretrained(
+                    model,
+                    dtype=requested_dtype,
+                )
+                .to(self.device)
+                .eval()
             )
+            self.model_dtype = next(self.model.parameters()).dtype
+
             self.size_kwargs = (
-                {"size": {"height": image_size, "width": image_size}} if image_size else {}
+                {"size": {"height": image_size, "width": image_size}}
+                if image_size
+                else {}
             )
 
         def __call__(self, images):
@@ -153,14 +199,25 @@ def _make_embed_udf(daft, model: str, image_size: int, batch_size: int, use_gpu:
             if not idx:
                 return out
             batch = [np.asarray(arrays[i]) for i in idx]
-            inputs = self.processor(images=batch, return_tensors="pt", **self.size_kwargs)
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            inputs = self.processor(
+                images=batch,
+                return_tensors="pt",
+                **self.size_kwargs,
+            )
+            inputs = _move_model_inputs(
+                inputs,
+                self.device,
+                self.model_dtype,
+            )
+
             with self.torch.inference_mode():
                 outputs = self.model(**inputs)
-            pooled = getattr(outputs, "pooler_output", None)
-            if pooled is None:
-                pooled = outputs.last_hidden_state[:, 0]
-            pooled = self.torch.nn.functional.normalize(pooled.float(), dim=-1)
+
+            pooled = outputs.pooler_output
+            pooled = self.torch.nn.functional.normalize(
+                pooled.float(),
+                dim=-1,
+            )
             vectors = pooled.cpu().numpy()
             for j, i in enumerate(idx):
                 out[i] = vectors[j].tolist()
@@ -198,7 +255,12 @@ def _run_daft(ctx: RunContext, survivors) -> None:
         df = df.where(owns_row(col("path")))
     df = with_downloaded_image(daft, df, dataset_roots(cfg))
     embed_udf = _make_embed_udf(
-        daft, cfg.embedding.model, cfg.embedding.image_size, cfg.embedding.batch_size, use_gpu
+        daft,
+        cfg.embedding.model,
+        cfg.embedding.image_size,
+        cfg.embedding.batch_size,
+        cfg.embedding.dtype,
+        use_gpu,
     ).with_concurrency(concurrency)
     result = df.select("image_id", "path", embed_udf(col("image")).alias("embedding"))
 
@@ -248,10 +310,23 @@ def _embed_worker(spec: _WorkerSpec) -> None:
     from ..store import EmbeddingShardWriter
 
     _init_image_plugins()
-    use_cuda = spec.device.startswith("cuda")
-    dtype = torch.float16 if use_cuda else torch.float32
+    model_dtype = _resolve_model_dtype(
+    torch,
+    spec.dtype,
+    spec.device,
+    )
+
     processor = AutoImageProcessor.from_pretrained(spec.model)
-    model = AutoModel.from_pretrained(spec.model, dtype=dtype).to(spec.device).eval()
+    model = (
+        AutoModel.from_pretrained(
+            spec.model,
+            dtype=model_dtype,
+        )
+        .to(spec.device)
+        .eval()
+    )
+
+    model_dtype = next(model.parameters()).dtype
     size_kwargs = (
         {"size": {"height": spec.image_size, "width": spec.image_size}}
         if spec.image_size
@@ -268,14 +343,26 @@ def _embed_worker(spec: _WorkerSpec) -> None:
         nonlocal writer, skipped
         if not images:
             return
-        inputs = processor(images=images, return_tensors="pt", **size_kwargs)
-        inputs = {k: v.to(spec.device) for k, v in inputs.items()}
+        inputs = processor(
+            images=images,
+            return_tensors="pt",
+            **size_kwargs,
+        )
+        inputs = _move_model_inputs(
+            inputs,
+            spec.device,
+            model_dtype,
+        )
+
         with torch.inference_mode():
             outputs = model(**inputs)
-        pooled = getattr(outputs, "pooler_output", None)
-        if pooled is None:
-            pooled = outputs.last_hidden_state[:, 0]
-        pooled = torch.nn.functional.normalize(pooled.float(), dim=-1)
+
+        pooled = outputs.pooler_output
+        pooled = torch.nn.functional.normalize(
+            pooled.float(),
+            dim=-1,
+        )
+
         vectors = pooled.to(torch.float16).cpu().numpy()
         if writer is None:
             writer = EmbeddingShardWriter(spec.out_path, vectors.shape[1], spec.flush_rows)

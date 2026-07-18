@@ -13,6 +13,7 @@ CLUSTER_BACKENDS = {"auto", "usearch", "sklearn"}
 DAFT_RUNNERS = {"native", "ray"}
 COLUMN_ROLES = {"image", "label", "generator", "split"}
 SPLIT_NAMES = {"train", "val", "test"}
+EMBEDDING_DTYPES = {"float16", "float32"}
 
 
 class ConfigError(ValueError):
@@ -99,11 +100,18 @@ class EmbeddingConfig:
     dtype: str = "float16"
     devices: str = "auto"
     flush_rows: int = 20_000
-    concurrency: int = 0  # daft runner only: number of model replicas (0 = auto)
+    concurrency: int = 0
 
     def __post_init__(self) -> None:
+        if self.dtype not in EMBEDDING_DTYPES:
+            raise ConfigError(
+                "embedding.dtype must be one of "
+                f"{sorted(EMBEDDING_DTYPES)}, got {self.dtype!r}"
+            )
         if self.concurrency < 0:
-            raise ConfigError("embedding.concurrency must be >= 0 (0 means auto)")
+            raise ConfigError(
+                "embedding.concurrency must be >= 0 (0 means auto)"
+            )
 
 
 @dataclass(frozen=True)
