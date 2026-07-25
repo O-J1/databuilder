@@ -10,8 +10,7 @@ num_workers = 16
 [download]
 # One Hugging Face snapshot worker means one dataset-file transfer at a time.
 max_workers = 1
-# Let Xet use the machine's available CPU, disk, and network on rank 0.
-xet_high_performance = true
+xet_high_performance = false
 
 [[datasets]]
 name = "nijijourney-v6-520k-raw"
@@ -137,6 +136,10 @@ allow_patterns = ["*.parquet", "**/*.parquet"]
 label = "column:label"
 generator = "column:model"
 columns = { image = "image" }
+# The maintainers acknowledged unresolved image/prompt mispairing for the first
+# four model groups. SANA rows are separately reported as invalid noise images.
+# String exclusions are case-insensitive and happen before image decoding.
+row_exclude = { model = ["flux.1-dev", "sd-3.5", "sdxl-realvis-v5", "sd-1.5-dreamshaper", "SANA"] }
 
 # Both candidates in each Rapidata preference pair are generated images.
 [[datasets]]

@@ -160,6 +160,20 @@ def test_label_map_validation():
     assert ds.label_map == {"pics": "real", "sd15": "fake"}
 
 
+def test_row_exclude_validation():
+    ds = DatasetConfig(
+        name="x",
+        repo_id="a/b",
+        label="fake",
+        row_exclude={"model": ["broken-a", "SANA"]},
+    )
+    assert ds.row_exclude == {"model": ("broken-a", "SANA")}
+    with pytest.raises(ConfigError, match="non-empty array"):
+        DatasetConfig(
+            name="x", repo_id="a/b", label="fake", row_exclude={"model": "broken-a"}
+        )
+
+
 def test_old_split_key_gives_guidance(tmp_path):
     text = MINIMAL.replace('label = "fake"', 'label = "fake"\nsplit = "train"')
     with pytest.raises(ConfigError, match="source_split"):
@@ -209,11 +223,11 @@ def test_aigc_production_config_is_pinned_and_snapshot_only():
     assert cfg.runtime.data_dir.as_posix() == "/p/data1/datasets/mmlaion/aigc/data"
     assert cfg.download.max_workers == 1
     assert cfg.download.xet_high_performance is True
-    assert len(cfg.datasets) == 52
-    assert len({ds.repo_id for ds in cfg.datasets}) == 41
+    assert len(cfg.datasets) == 51
+    assert len({ds.repo_id for ds in cfg.datasets}) == 40
     assert all(ds.revision for ds in cfg.datasets)
     raw = {ds.name for ds in cfg.datasets if ds.download_only}
-    assert raw == {"dim-t2i", "anycrap", "seaart-hq"}
+    assert raw == {"anycrap", "seaart-hq"}
     assert all(ds.format == "raw" for ds in cfg.datasets if ds.download_only)
     assert not any(image.kind == "url" for ds in cfg.datasets for image in ds.images)
 
@@ -244,3 +258,14 @@ def test_aigc_production_config_is_pinned_and_snapshot_only():
     assert so_fake_ood.label_map["0"] == "real"
     assert so_fake_ood.label_map["1"] == "fake"
     assert so_fake_ood.label_map["2"] == "fake"
+
+    openfake = next(ds for ds in cfg.datasets if ds.name == "openfake")
+    assert openfake.row_exclude == {
+        "model": (
+            "flux.1-dev",
+            "sd-3.5",
+            "sdxl-realvis-v5",
+            "sd-1.5-dreamshaper",
+            "SANA",
+        )
+    }

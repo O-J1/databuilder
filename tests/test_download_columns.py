@@ -134,6 +134,41 @@ def test_null_dynamic_generator_materializes_as_unknown(tmp_path, make_ctx):
     assert written == ["real/unknown/nullable-generator_00000_000000000.png"]
 
 
+def test_materialize_parquet_excludes_configured_rows_case_insensitively(
+    tmp_path, make_ctx
+):
+    source = tmp_path / "excluded-models"
+    source.mkdir()
+    png = _png_bytes()
+    pq.write_table(
+        pa.table(
+            {
+                "image": pa.array([png, png, png], type=pa.binary()),
+                "label": ["fake", "fake", "fake"],
+                "model": ["good-model", "flux.1-dev", "sana"],
+            }
+        ),
+        source / "rows.parquet",
+    )
+    ds = DatasetConfig(
+        name="excluded-models",
+        path=str(source),
+        format="parquet",
+        label="column:label",
+        generator="column:model",
+        columns={"image": "image"},
+        row_exclude={"model": ["flux.1-dev", "SANA"]},
+    )
+    ctx = make_ctx(datasets=(ds,))
+    download.run(ctx)
+
+    target = ctx.data_dir / "excluded-models"
+    written = [path.relative_to(target).as_posix() for path in target.rglob("*.png")]
+    assert written == ["fake/good-model/excluded-models_00000_000000000.png"]
+    marker = json.loads((target / MATERIALIZED_MARKER).read_text(encoding="utf-8"))
+    assert marker["filtered"] == 2
+
+
 def test_snapshot_download_is_rank0_single_worker_and_stays_in_data_dir(
     tmp_path, make_ctx, monkeypatch
 ):

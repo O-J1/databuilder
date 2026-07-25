@@ -260,9 +260,17 @@ def _resolve_table(ds: DatasetConfig, schema: pa.Schema) -> TableMap:
         split = ds.split_column or _automatch(names, SPLIT_COLUMN_CANDIDATES)
         if ds.split_column:
             _require(ds, names, "split", split)
-    for column in ds.row_filter:
-        _require(ds, names, "row_filter", column)
+    for column in (*ds.row_filter, *ds.row_exclude):
+        _require(ds, names, "row filter", column)
     return TableMap(ds.images, label, generator, split)
+
+
+def _is_excluded(value: object, excluded: tuple[object, ...]) -> bool:
+    """Match excluded strings case-insensitively; preserve exact matching otherwise."""
+    if isinstance(value, str):
+        folded = value.casefold()
+        return any(isinstance(item, str) and item.casefold() == folded for item in excluded)
+    return value in excluded
 
 
 class _RowMaterializer:
@@ -281,6 +289,7 @@ class _RowMaterializer:
         self.mapping = mapping
         self.written = 0
         self.skipped = 0
+        self.filtered = 0
 
     @property
     def layout(self) -> dict[str, bool]:
@@ -292,12 +301,20 @@ class _RowMaterializer:
 
     def add(self, row: dict, file_idx: int, source_path: Path) -> None:
         if any(row.get(column) != expected for column, expected in self.ds.row_filter.items()):
+            self.filtered += 1
+            return
+        if any(
+            _is_excluded(row.get(column), excluded)
+            for column, excluded in self.ds.row_exclude.items()
+        ):
+            self.filtered += 1
             return
         if (
             self.mapping.split
             and self.ds.source_split
             and str(row.get(self.mapping.split)) != self.ds.source_split
         ):
+            self.filtered += 1
             return
         for image_idx, spec in enumerate(self.mapping.images):
             data = _encoded_bytes(
@@ -335,6 +352,7 @@ class _RowMaterializer:
             "format": fmt,
             "written": self.written,
             "skipped": self.skipped,
+            "filtered": self.filtered,
             "layout": self.layout,
         }
 
@@ -344,6 +362,7 @@ def _selected_columns(ds: DatasetConfig, mapping: TableMap) -> list[str]:
     columns += [spec.generator_column for spec in mapping.images if spec.generator_column]
     columns += [mapping.label, mapping.generator, mapping.split]
     columns += list(ds.row_filter)
+    columns += list(ds.row_exclude)
     return list(dict.fromkeys(column for column in columns if column))
 
 

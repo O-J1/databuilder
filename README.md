@@ -185,6 +185,9 @@ See [examples/build.example.toml](examples/build.example.toml). Key sections:
   (`image`, `label`, `generator`, `split`); automatch covers common names and
   hard-errors listing the schema when a required role cannot be matched.
   `[datasets.label_map]` maps custom folder names / column values to real/fake.
+  `row_filter = { column = value }` keeps matching rows; `row_exclude =
+  { column = [values] }` drops listed values before image decoding (string
+  comparisons are case-insensitive).
   `images = [{ column = "image1", generator_column = "model1" }, ...]` maps
   tables with multiple image fields. Supported materializers are parquet,
   Arrow, JSONL with local image paths, zip, tar/WebDataset, split zip,
@@ -195,7 +198,7 @@ See [examples/build.example.toml](examples/build.example.toml). Key sections:
   the whole dataset into one output split (forced val/test bypass balancing
   caps and cluster pruning).
 
-The requested 41-repository corpus is ready in
+The requested 40-repository corpus is ready in
 [`examples/aigc-datasets.toml`](examples/aigc-datasets.toml). It pins every
 revision, writes snapshots and caches only below
 `/p/data1/datasets/mmlaion/aigc/data`, selects generated outputs (not source

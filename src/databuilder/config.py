@@ -237,6 +237,7 @@ class DatasetConfig:
     download_only: bool = False
     images: tuple[ImageColumnConfig, ...] = ()
     row_filter: dict = field(default_factory=dict)
+    row_exclude: dict = field(default_factory=dict)
     metadata_file: str = ""
     output_column: str = ""
     multipart_glob: str = ""
@@ -251,6 +252,20 @@ class DatasetConfig:
         )
         object.__setattr__(self, "images", images)
         object.__setattr__(self, "row_filter", dict(self.row_filter))
+        row_exclude = {}
+        for column, values in dict(self.row_exclude).items():
+            if not isinstance(column, str) or not column:
+                raise ConfigError(
+                    f"dataset {self.name!r}: [datasets.row_exclude] keys must be "
+                    "non-empty column names"
+                )
+            if not isinstance(values, (list, tuple)) or not values:
+                raise ConfigError(
+                    f"dataset {self.name!r}: row_exclude.{column} must be a "
+                    "non-empty array of values"
+                )
+            row_exclude[column] = tuple(values)
+        object.__setattr__(self, "row_exclude", row_exclude)
         if not self.name:
             raise ConfigError("datasets entries need a non-empty name")
         if bool(self.repo_id) == bool(self.path):
