@@ -39,6 +39,11 @@ def dataset_by_name(cfg: Config, name: str) -> DatasetConfig | None:
     return None
 
 
+def pipeline_datasets(cfg: Config) -> tuple[DatasetConfig, ...]:
+    """Datasets that produce images for filtering and manifest stages."""
+    return tuple(ds for ds in cfg.datasets if not ds.download_only)
+
+
 def dataset_root(cfg: Config, ds: DatasetConfig) -> Path:
     """Directory that holds this dataset's images (in place for local imagefolders)."""
     if ds.in_place:
@@ -47,7 +52,7 @@ def dataset_root(cfg: Config, ds: DatasetConfig) -> Path:
 
 
 def dataset_roots(cfg: Config) -> dict[str, str]:
-    return {ds.name: str(dataset_root(cfg, ds)) for ds in cfg.datasets}
+    return {ds.name: str(dataset_root(cfg, ds)) for ds in pipeline_datasets(cfg)}
 
 
 def protected_datasets(cfg: Config) -> frozenset[str]:
@@ -57,7 +62,9 @@ def protected_datasets(cfg: Config) -> frozenset[str]:
     opts a dataset back in. Materialized copies under runtime.data_dir are
     transient and always deletable.
     """
-    return frozenset(ds.name for ds in cfg.datasets if ds.in_place and not ds.allow_delete)
+    return frozenset(
+        ds.name for ds in pipeline_datasets(cfg) if ds.in_place and not ds.allow_delete
+    )
 
 
 def resolve_abs_from_roots(roots: dict[str, str], rel: str) -> Path:
@@ -154,7 +161,7 @@ def normalize_label(label_str: str) -> int:
 
 def validate_local_datasets(cfg: Config) -> None:
     """Fail fast, before any stage runs, when local datasets are unusable."""
-    for ds in cfg.datasets:
+    for ds in pipeline_datasets(cfg):
         if not ds.is_local:
             continue
         root = Path(ds.path)

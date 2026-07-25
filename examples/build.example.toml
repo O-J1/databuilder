@@ -7,6 +7,10 @@ num_workers = 16
 world_size = 8                            # or pass --world-size / WORLD_SIZE / SLURM_NTASKS
 rank = 0                                  # or pass --rank / RANK / SLURM_PROCID
 
+[download]
+max_workers = 1              # rank 0 only; HF/Xet owns transfer resume state
+xet_high_performance = false # opt in to saturating rank 0's CPU/disk/network
+
 [filters]
 min_longest_side = 256      # delete when the longest side is smaller
 max_tall = "9:23"           # delete when taller (width:height below this)

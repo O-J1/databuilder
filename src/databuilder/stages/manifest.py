@@ -11,7 +11,7 @@ import pyarrow.parquet as pq
 from ..config import CSV_MAX_ROWS
 from ..state import RunContext
 from ..utils import ParquetShardWriter, iter_parquet_batches
-from .common import dataset_roots, normalize_label, resolve_abs_from_roots
+from .common import dataset_roots, normalize_label, pipeline_datasets, resolve_abs_from_roots
 
 log = logging.getLogger("databuilder.manifest")
 
@@ -155,13 +155,14 @@ def run(ctx: RunContext) -> None:
         return np.where(found, values[pos], default)
 
     survivors = ctx.artifact_dir("dedup") / "survivors.parquet"
+    datasets = pipeline_datasets(ctx.cfg)
     forced = {
         ds.name: ds.assign_split
-        for ds in ctx.cfg.datasets
+        for ds in datasets
         if ds.assign_split in {"val", "test"}
     }
-    pinned_train = {ds.name for ds in ctx.cfg.datasets if ds.assign_split == "train"}
-    in_place = {ds.name for ds in ctx.cfg.datasets if ds.in_place}
+    pinned_train = {ds.name for ds in datasets if ds.assign_split == "train"}
+    in_place = {ds.name for ds in datasets if ds.in_place}
     roots = dataset_roots(ctx.cfg)
 
     # Pass 1: compact arrays of eligible (non-pruned, embedded) rows. Rows from

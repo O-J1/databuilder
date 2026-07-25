@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 from ..state import RunContext
 from ..store import ParquetEmbeddingStore
 from ..utils import iter_parquet_batches
+from .common import pipeline_datasets
 
 log = logging.getLogger("databuilder.cluster")
 
@@ -183,7 +184,9 @@ def _assign(
 
 def _exempt_mask(ctx: RunContext, ids: np.ndarray) -> np.ndarray | None:
     """Rows from datasets forced to val/test are never pruned."""
-    forced = {ds.name for ds in ctx.cfg.datasets if ds.assign_split in {"val", "test"}}
+    forced = {
+        ds.name for ds in pipeline_datasets(ctx.cfg) if ds.assign_split in {"val", "test"}
+    }
     if not forced:
         return None
     survivors = ctx.artifact_dir("dedup") / "survivors.parquet"

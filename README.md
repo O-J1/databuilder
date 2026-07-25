@@ -15,7 +15,7 @@ pip install -e "./databuilder[viz]"    # + FastAPI/uvicorn/umap for the viewer
 
 | # | Stage        | Scope     | What it does |
 |---|--------------|-----------|--------------|
-| 1 | `download`   | per node  | HF snapshot + materialize (parquet bytes / zip / imagefolder) |
+| 1 | `download`   | rank 0    | one-worker HF/Xet snapshots + format-aware materialization |
 | 2 | `headerscan` | per node  | delete: longest side < min, broken headers, aspect beyond 9:23 / 23:9, broken files |
 | 3 | `fingerprint`| per node* | one decode: Laplacian filter + xxh3 + phash (12x12) + colorhash |
 | 4 | `dedup`      | rank 0    | global exact + near-duplicate delete (keep highest res, then largest file) |
@@ -47,8 +47,9 @@ Rank and world size are resolved with this precedence (first hit wins):
 3. `RANK` / `WORLD_SIZE`
 4. `SLURM_PROCID` / `SLURM_NTASKS` (then `SLURM_NODEID` / `SLURM_NNODES`)
 
-The log states which source was used. Rank 0 runs the global stages (dedup,
-cluster, manifest); other ranks wait at barriers and resume automatically.
+The log states which source was used. Rank 0 runs download and the global
+stages (dedup, cluster, manifest); other ranks never contact Hugging Face and
+wait at the download barrier before starting their sharded work.
 Re-running skips completed stages.
 
 ### Manual launch (no scheduler)
@@ -158,6 +159,12 @@ session; nothing is exposed to the internet and no firewall changes are made.
 See [examples/build.example.toml](examples/build.example.toml). Key sections:
 
 - `[runtime]` - `work_dir`, `data_dir`, `num_workers`, `world_size`/`rank`
+- `[download]` - Hugging Face `snapshot_download` concurrency. It defaults to
+  `max_workers = 1`, so snapshots run sequentially on rank 0 and rely on
+  HF/Xet for partial-transfer resume. Xet's range and cache-size settings stay
+  at Hugging Face defaults. Set `xet_high_performance = true` to let Xet
+  maximize rank 0's CPU, disk, and network use. Databuilder does not implement
+  per-file HF transfers or its own download resume ledger.
 - `[filters]` - `min_longest_side`, `max_tall = "9:23"`, `max_wide = "23:9"`, `laplacian_min/max`
 - `[dedup]` - `phash_size = 12`, `phash_max_hamming`, `colorhash_max_hamming`
 - `[embedding]` - DINOv3 `model` id (any size), `batch_size`, `devices = "auto"`,
@@ -178,9 +185,48 @@ See [examples/build.example.toml](examples/build.example.toml). Key sections:
   (`image`, `label`, `generator`, `split`); automatch covers common names and
   hard-errors listing the schema when a required role cannot be matched.
   `[datasets.label_map]` maps custom folder names / column values to real/fake.
-  `source_split` picks the HF split to download; `assign_split = "test"` forces
+  `images = [{ column = "image1", generator_column = "model1" }, ...]` maps
+  tables with multiple image fields. Supported materializers are parquet,
+  Arrow, JSONL with local image paths, zip, tar/WebDataset, split zip,
+  imagefolder, and `raw`. External image URLs are never fetched individually.
+  `download_only = true` with `format = "raw"` retains a snapshot but excludes
+  it from headerscan and every downstream manifest stage. `source_split` picks
+  the HF split to download; `assign_split = "test"` forces
   the whole dataset into one output split (forced val/test bypass balancing
   caps and cluster pruning).
+
+The requested 41-repository corpus is ready in
+[`examples/aigc-datasets.toml`](examples/aigc-datasets.toml). It pins every
+revision, writes snapshots and caches only below
+`/p/data1/datasets/mmlaion/aigc/data`, selects generated outputs (not source
+references) from UniPic, and preserves ambiguous or URL-only repositories as
+raw snapshots. The card/schema audit and real/fake decisions are recorded in
+[`docs/aigc-dataset-labels.md`](docs/aigc-dataset-labels.md).
+
+### URL-backed image datasets
+
+The main pipeline snapshots URL metadata but deliberately does not issue one
+HTTP request per image. `kafked/anycrap` and `lehduong/seaart-hq` can instead
+be downloaded independently with:
+
+```bash
+python scripts/download_url_datasets.py \
+  --data-dir /p/data1/datasets/mmlaion/aigc/data \
+  --workers 16
+```
+
+Use `--dataset anycrap` or `--dataset seaart-hq` to select one source,
+`--limit 100 --dry-run` to inspect its metadata count, and
+`--skip-metadata-snapshot` to make no Hugging Face call when the pinned
+metadata snapshot is already present. Downloads are streamed, size-limited,
+decoded before acceptance, atomically renamed, and skipped on rerun when the
+URL-derived destination already exists. Success and failure JSONL logs are
+written beside the images under `<data-dir>/<dataset>/url-images/`.
+
+This standalone download does not change `download_only = true` in the main
+config. To feed the downloaded images into a later build, add their
+`url-images` directory as a local `imagefolder` dataset with static
+`label = "fake"` and the appropriate generator (`anycrap` or `seaart`).
 
 ### Local filesystem datasets
 

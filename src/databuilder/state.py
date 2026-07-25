@@ -11,7 +11,7 @@ from .config import Config, ConfigError
 log = logging.getLogger("databuilder")
 
 STAGES = ("download", "headerscan", "fingerprint", "dedup", "embed", "cluster", "manifest")
-RANK0_STAGES = frozenset({"dedup", "cluster", "manifest"})
+RANK0_STAGES = frozenset({"download", "dedup", "cluster", "manifest"})
 # With the daft ray runner, rank 0 submits these stages to the Ray cluster and
 # the remaining ranks only wait at the stage barrier.
 DAFT_RAY_STAGES = frozenset({"fingerprint", "embed"})

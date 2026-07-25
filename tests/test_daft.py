@@ -15,6 +15,7 @@ DAFT_NATIVE = DaftConfig(enabled=True, runner="native")
 
 def test_rank0_stage_topology_with_ray(make_ctx):
     ray_ctx = make_ctx(daft=DaftConfig(enabled=True, runner="ray"))
+    assert ray_ctx.is_rank0_stage("download")
     assert ray_ctx.is_rank0_stage("fingerprint")
     assert ray_ctx.is_rank0_stage("embed")
     assert ray_ctx.is_rank0_stage("dedup")
@@ -22,6 +23,7 @@ def test_rank0_stage_topology_with_ray(make_ctx):
     assert ray_ctx.expected_ranks("fingerprint") == 1
 
     native_ctx = make_ctx(daft=DAFT_NATIVE)
+    assert native_ctx.is_rank0_stage("download")
     assert not native_ctx.is_rank0_stage("fingerprint")
     assert not native_ctx.is_rank0_stage("embed")
     assert native_ctx.is_rank0_stage("dedup")

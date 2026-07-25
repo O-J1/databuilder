@@ -8,7 +8,19 @@ from typing import Any
 
 CSV_MAX_ROWS = 1_000_000
 
-DATASET_FORMATS = {"auto", "parquet", "zip", "imagefolder"}
+DATASET_FORMATS = {
+    "auto",
+    "parquet",
+    "arrow",
+    "jsonl",
+    "zip",
+    "tar",
+    "webdataset",
+    "multipart_zip",
+    "imagefolder",
+    "raw",
+}
+IMAGE_KINDS = {"auto", "embedded", "path"}
 CLUSTER_BACKENDS = {"auto", "usearch", "sklearn"}
 DAFT_RUNNERS = {"native", "ray"}
 COLUMN_ROLES = {"image", "label", "generator", "split"}
@@ -55,6 +67,20 @@ class RuntimeConfig:
             )
         if self.num_workers < 1:
             raise ConfigError("runtime.num_workers must be >= 1")
+
+
+@dataclass(frozen=True)
+class DownloadConfig:
+    """Hugging Face snapshot concurrency controls."""
+
+    max_workers: int = 1
+    xet_high_performance: bool = False
+
+    def __post_init__(self) -> None:
+        if self.max_workers < 1:
+            raise ConfigError("download.max_workers must be >= 1")
+        if not isinstance(self.xet_high_performance, bool):
+            raise ConfigError("download.xet_high_performance must be true or false")
 
 
 @dataclass(frozen=True)
@@ -171,6 +197,29 @@ class BalanceConfig:
 
 
 @dataclass(frozen=True)
+class ImageColumnConfig:
+    """One image-bearing field in a tabular dataset."""
+
+    column: str
+    kind: str = "auto"
+    generator: str = ""
+    generator_column: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.column:
+            raise ConfigError("datasets.images entries need a non-empty column")
+        if self.kind not in IMAGE_KINDS:
+            raise ConfigError(
+                f"datasets.images kind must be one of {sorted(IMAGE_KINDS)}, "
+                f"got {self.kind!r}"
+            )
+        if self.generator and self.generator_column:
+            raise ConfigError(
+                "datasets.images entries cannot set both generator and generator_column"
+            )
+
+
+@dataclass(frozen=True)
 class DatasetConfig:
     name: str
     label: str
@@ -185,11 +234,23 @@ class DatasetConfig:
     keep_archives: bool = False
     allow_delete: bool = False
     assign_split: str = ""
+    download_only: bool = False
+    images: tuple[ImageColumnConfig, ...] = ()
+    row_filter: dict = field(default_factory=dict)
+    metadata_file: str = ""
+    output_column: str = ""
+    multipart_glob: str = ""
     columns: dict = field(default_factory=dict)
     label_map: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "allow_patterns", tuple(self.allow_patterns))
+        images = tuple(
+            image if isinstance(image, ImageColumnConfig) else ImageColumnConfig(**image)
+            for image in self.images
+        )
+        object.__setattr__(self, "images", images)
+        object.__setattr__(self, "row_filter", dict(self.row_filter))
         if not self.name:
             raise ConfigError("datasets entries need a non-empty name")
         if bool(self.repo_id) == bool(self.path):
@@ -204,7 +265,26 @@ class DatasetConfig:
         if self.path and self.format == "auto":
             raise ConfigError(
                 f"dataset {self.name!r}: local datasets need an explicit format "
-                "('imagefolder', 'parquet', or 'zip')"
+                f"({', '.join(sorted(DATASET_FORMATS - {'auto'}))})"
+            )
+        if self.download_only and self.format != "raw":
+            raise ConfigError(
+                f"dataset {self.name!r}: download_only datasets must use format = 'raw'"
+            )
+        if self.format == "raw" and not self.download_only:
+            raise ConfigError(
+                f"dataset {self.name!r}: format = 'raw' requires download_only = true"
+            )
+        if self.format == "multipart_zip":
+            if not self.multipart_glob or not self.metadata_file or not self.output_column:
+                raise ConfigError(
+                    f"dataset {self.name!r}: multipart_zip requires multipart_glob, "
+                    "metadata_file, and output_column"
+                )
+        elif self.multipart_glob or self.metadata_file or self.output_column:
+            raise ConfigError(
+                f"dataset {self.name!r}: multipart_glob/metadata_file/output_column "
+                "are only valid with format = 'multipart_zip'"
             )
         if self.assign_split and self.assign_split not in SPLIT_NAMES:
             raise ConfigError(
@@ -215,10 +295,10 @@ class DatasetConfig:
         # legacy 'column:<name>' syntax feeds the columns table
         if self.label.startswith("column:"):
             columns.setdefault("label", self.label.removeprefix("column:"))
-        elif self.label not in {"real", "fake", "folder", "auto"}:
+        elif self.label not in {"real", "fake", "folder", "auto", "unknown"}:
             raise ConfigError(
                 f"dataset {self.name!r}: label must be 'real', 'fake', 'folder', "
-                "'auto', or 'column:<name>'"
+                "'auto', 'unknown', or 'column:<name>'"
             )
         if self.generator.startswith("column:"):
             columns.setdefault("generator", self.generator.removeprefix("column:"))
@@ -234,6 +314,10 @@ class DatasetConfig:
                 f"dataset {self.name!r}: [datasets.columns] values must be column names"
             )
         object.__setattr__(self, "columns", columns)
+        if images and "image" in columns:
+            raise ConfigError(
+                f"dataset {self.name!r}: set either columns.image or images, not both"
+            )
 
         label_map = {}
         for key, value in dict(self.label_map).items():
@@ -275,6 +359,7 @@ class DatasetConfig:
 @dataclass(frozen=True)
 class Config:
     runtime: RuntimeConfig
+    download: DownloadConfig = field(default_factory=DownloadConfig)
     filters: FiltersConfig = field(default_factory=FiltersConfig)
     dedup: DedupConfig = field(default_factory=DedupConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
@@ -314,6 +399,7 @@ def load_config(path: Path | str, overrides: dict[str, Any] | None = None) -> Co
         raise ConfigError("[[datasets]] must be an array of tables")
 
     sections = {
+        "download": DownloadConfig,
         "filters": FiltersConfig,
         "dedup": DedupConfig,
         "embedding": EmbeddingConfig,

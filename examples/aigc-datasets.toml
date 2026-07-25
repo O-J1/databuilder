@@ -1,0 +1,561 @@
+# Curated AIGC corpus. Revisions and label/generator mappings were audited
+# against the Hugging Face dataset cards/schemas in July 2026.
+# Run this only on the destination machine; the snapshot stage is rank 0 only.
+
+[runtime]
+data_dir = "/p/data1/datasets/mmlaion/aigc/data"
+work_dir = "/p/data1/datasets/mmlaion/aigc/data/.databuilder-work"
+num_workers = 16
+
+[download]
+# One Hugging Face snapshot worker means one dataset-file transfer at a time.
+max_workers = 1
+# Let Xet use the machine's available CPU, disk, and network on rank 0.
+xet_high_performance = true
+
+[[datasets]]
+name = "nijijourney-v6-520k-raw"
+repo_id = "terminusresearch/nijijourney-v6-520k-raw"
+revision = "528585a80bc79141025aa8d2e6d95a89419bdd69"
+format = "tar"
+allow_patterns = ["*.tar", "*.tar.gz", "**/*.tar", "**/*.tar.gz"]
+label = "fake"
+generator = "nijijourney-v6"
+
+[[datasets]]
+name = "midjourney-v6-520k-raw"
+repo_id = "terminusresearch/midjourney-v6-520k-raw"
+revision = "b6e818fde4458b741b6a8ffe347d2ec4517889ff"
+format = "tar"
+allow_patterns = ["*.tar", "*.tar.gz", "**/*.tar", "**/*.tar.gz"]
+label = "fake"
+generator = "midjourney-v6"
+
+[[datasets]]
+name = "genimage-midjourney"
+repo_id = "bitmind/GenImage_MidJourney"
+revision = "583d750ace927061a1159de64ca65b82f784f661"
+format = "parquet"
+allow_patterns = ["*.parquet", "**/*.parquet"]
+label = "fake"
+generator = "midjourney"
+columns = { image = "image" }
+
+[[datasets]]
+name = "midjourney-23m"
+repo_id = "Ashenone3/Midjourney-23M"
+revision = "806a51df8373d609d36c84c33b277ff69a1e44b0"
+format = "webdataset"
+allow_patterns = ["*.tar", "**/*.tar"]
+label = "fake"
+generator = "midjourney"
+
+[[datasets]]
+name = "midjourney-v6-recap"
+repo_id = "Photoroom/midjourney-v6-recap"
+revision = "21c628db81401da88c5b33507230528cf3fe4a12"
+format = "parquet"
+allow_patterns = ["*.parquet", "**/*.parquet"]
+label = "fake"
+generator = "midjourney-v6"
+columns = { image = "image" }
+
+[[datasets]]
+name = "nano-banana-synthetic-1500"
+repo_id = "SaunakSS/nano-banana-synthetic-images-1500"
+revision = "ad3a8487430c10d3c0d564ccea1642e85e8e3d58"
+format = "zip"
+allow_patterns = ["*.zip", "**/*.zip"]
+label = "fake"
+generator = "nano-banana"
+
+[[datasets]]
+name = "nano-banana-pro-zh-en"
+repo_id = "FlameF0X/nano-banana-pro-gen-zh-en"
+revision = "4e172186cb460e90342d232596a9b66406d66613"
+format = "arrow"
+allow_patterns = ["*.arrow", "**/*.arrow"]
+label = "fake"
+generator = "nano-banana-pro"
+columns = { image = "image" }
+
+[[datasets]]
+name = "mj-dalle-sd-nanobanana"
+repo_id = "julienlucas/midjourney-dalle-sd-nanobananapro-dataset"
+revision = "25c4fb41242b8b8e43dda7c5e6291ac74b34e16b"
+format = "parquet"
+allow_patterns = ["*.parquet", "**/*.parquet"]
+label = "column:label"
+generator = "mixed-ai-generators"
+columns = { image = "image" }
+label_map = { "0" = "fake", "1" = "real" }
+
+[[datasets]]
+name = "bitmind-nano-banana"
+repo_id = "bitmind/nano-banana"
+revision = "9ea8da32a5be03f4946e6cb10c2d2f8e90f0a0a4"
+format = "parquet"
+allow_patterns = ["*.parquet", "**/*.parquet"]
+label = "fake"
+generator = "nano-banana"
+columns = { image = "image" }
+
+[[datasets]]
+name = "dream-gpt-image"
+repo_id = "Dream000/gpt-image"
+revision = "7d9db8ecbb7fe98d61f12f548f53a8ae9b84602b"
+format = "zip"
+allow_patterns = ["*.zip", "**/*.zip"]
+label = "fake"
+generator = "gpt-image"
+
+[[datasets]]
+name = "gpt-image-1-output"
+repo_id = "Tungtom2004/Output_dataset_gptImage1"
+revision = "ef327a0e5f089b34e27f25d2a7700c5fba811bf7"
+format = "imagefolder"
+allow_patterns = ["*.png", "**/*.png", "*.jpg", "**/*.jpg"]
+label = "fake"
+generator = "gpt-image-1"
+
+[[datasets]]
+name = "sdxl-1024-100k"
+repo_id = "mhussainahmad/sdxl-1024-100k"
+revision = "48362733c7acf7f628c921da20aff587d7d10dfb"
+format = "parquet"
+allow_patterns = ["*.parquet", "**/*.parquet"]
+label = "fake"
+generator = "sdxl"
+columns = { image = "image" }
+
+[[datasets]]
+name = "openfake"
+repo_id = "ComplexDataLab/OpenFake"
+revision = "89dc06b251945d31ab1db210c586474601e84ecc"
+format = "parquet"
+allow_patterns = ["*.parquet", "**/*.parquet"]
+label = "column:label"
+generator = "column:model"
+columns = { image = "image" }
+
+# Both candidates in each Rapidata preference pair are generated images.
+[[datasets]]
+name = "ideogram-v2-preference"
+repo_id = "Rapidata/Ideogram-V2_t2i_human_preference"
+revision = "9d9bb0aa365e9fbc77e865731ec96655a10e0990"
+format = "parquet"
+allow_patterns = ["*.parquet", "**/*.parquet"]
+label = "fake"
+images = [
+  { column = "image1", kind = "embedded", generator_column = "model1" },
+  { column = "image2", kind = "embedded", generator_column = "model2" },
+]
+
+[[datasets]]
+name = "seedream-3-preference"
+repo_id = "Rapidata/Seedream-3_t2i_human_preference"
+revision = "a9cd84d2a93e82954fe69bd3097b53c48f51a486"
+format = "parquet"
+allow_patterns = ["*.parquet", "**/*.parquet"]
+label = "fake"
+images = [
+  { column = "image1", kind = "embedded", generator_column = "model1" },
+  { column = "image2", kind = "embedded", generator_column = "model2" },
+]
+
+[[datasets]]
+name = "flux-2-pro-preference"
+repo_id = "Rapidata/Flux-2-pro_t2i_human_preference"
+revision = "ef2e83f43b41897a8e1a40dd8a5dac209d164c79"
+format = "parquet"
+allow_patterns = ["*.parquet", "**/*.parquet"]
+label = "fake"
+images = [
+  { column = "image1", kind = "embedded", generator_column = "model1" },
+  { column = "image2", kind = "embedded", generator_column = "model2" },
+]
+
+[[datasets]]
+name = "evalgen"
+repo_id = "Junwei-Xi/EvalGEN"
+revision = "86c719a9bfc72b7e5d91bfbb04432774feb4e3b7"
+format = "zip"
+allow_patterns = ["*.zip", "**/*.zip"]
+label = "fake"
+generator = "folder"
+assign_split = "test"
+
+# All four preference columns are generated; the suffix identifies the model.
+[[datasets]]
+name = "open-image-preferences-v1"
+repo_id = "data-is-better-together/open-image-preferences-v1"
+revision = "071719e8f4b216b7de877384aaeb68bf95d40b04"
+format = "parquet"
+allow_patterns = ["*.parquet", "**/*.parquet"]
+label = "fake"
+images = [
+  { column = "image_quality_dev", kind = "embedded", generator = "flux.1-dev" },
+  { column = "image_simplified_dev", kind = "embedded", generator = "flux.1-dev" },
+  { column = "image_quality_sd", kind = "embedded", generator = "sd-3.5-large" },
+  { column = "image_simplified_sd", kind = "embedded", generator = "sd-3.5-large" },
+]
+
+[[datasets]]
+name = "seedream-4.5-generated-2k"
+repo_id = "ash12321/seedream-4.5-generated-2k"
+revision = "9adb0becc0de7ff618cee6b05a42d68acc1764a9d"
+format = "imagefolder"
+allow_patterns = ["*.png", "**/*.png", "*.jpg", "**/*.jpg"]
+label = "fake"
+generator = "seedream-4.5"
+
+# Each UniPic row contains real input references and a generated output. Only
+# output_image is selected from the split zip, so real inputs are not mislabeled.
+[[datasets]]
+name = "unipic-seedream-4images"
+repo_id = "Skywork/unipic_seedream_4images"
+revision = "f47c6dea1267a805b26fa99a1dcf901aef347d14"
+format = "multipart_zip"
+allow_patterns = ["seedream_4images.part_*", "seedream_4imgs_all.jsonl"]
+multipart_glob = "seedream_4images.part_*"
+metadata_file = "seedream_4imgs_all.jsonl"
+output_column = "output_image"
+label = "fake"
+generator = "seedream"
+
+[[datasets]]
+name = "unipic-seedream-5images"
+repo_id = "Skywork/unipic_seedream_5images"
+revision = "6188afe569b777e755f1141f1509cf1440733ec5"
+format = "multipart_zip"
+allow_patterns = ["seedream_5images.part_*", "seedream_5imgs_all.jsonl"]
+multipart_glob = "seedream_5images.part_*"
+metadata_file = "seedream_5imgs_all.jsonl"
+output_column = "output_image"
+label = "fake"
+generator = "seedream"
+
+[[datasets]]
+name = "unipic-seedream-6images"
+repo_id = "Skywork/unipic_seedream_6images"
+revision = "a949d43e6ea848dcc9c8f04a04bfa18aa00ef74e"
+format = "multipart_zip"
+allow_patterns = ["seedream_6images.part_*", "seedream_6imgs_all.jsonl"]
+multipart_glob = "seedream_6images.part_*"
+metadata_file = "seedream_6imgs_all.jsonl"
+output_column = "output_image"
+label = "fake"
+generator = "seedream"
+
+[[datasets]]
+name = "unipic-nano-2images"
+repo_id = "Skywork/unipic_nano_2images"
+revision = "738627847df94024e72f6e3a969faeb6c2185a9d"
+format = "multipart_zip"
+allow_patterns = ["nano-banana-2image_part_*", "unipic3_2imgs.jsonl"]
+multipart_glob = "nano-banana-2image_part_*"
+metadata_file = "unipic3_2imgs.jsonl"
+output_column = "output_image"
+label = "fake"
+generator = "nano-banana"
+
+[[datasets]]
+name = "unipic-nano-3images"
+repo_id = "Skywork/unipic_nano_3images"
+revision = "766c1ee4a883ea40056b3c623cd9d99e066d223c"
+format = "multipart_zip"
+allow_patterns = ["nano-banana.part_*", "unipic3_3images.jsonl"]
+multipart_glob = "nano-banana.part_*"
+metadata_file = "unipic3_3images.jsonl"
+output_column = "output_image"
+label = "fake"
+generator = "nano-banana"
+
+[[datasets]]
+name = "ideogram-75k"
+repo_id = "terminusresearch/ideogram-75k"
+revision = "0588df83de15f88bc17bc52dfc428dfe7d99ec66"
+format = "tar"
+allow_patterns = ["*.tar", "*.tar.gz", "**/*.tar", "**/*.tar.gz"]
+label = "fake"
+generator = "ideogram"
+
+[[datasets]]
+name = "kling-ai-images"
+repo_id = "deepthink8/kling-ai-images"
+revision = "47299658f71b2de1aea957a2cda41d66b077c104"
+format = "zip"
+allow_patterns = ["fake/*.zip", "**/fake/*.zip"]
+label = "fake"
+generator = "kling"
+
+[[datasets]]
+name = "klingai"
+repo_id = "nyuuzyou/klingai"
+revision = "4ae5e439e4e40b6f70c13bcd2f749d78f8416abe"
+format = "zip"
+allow_patterns = ["resource_*.zip", "**/resource_*.zip"]
+label = "fake"
+generator = "kling"
+
+[[datasets]]
+name = "nai3"
+repo_id = "hastylol/nai3"
+revision = "f7840d526b9cf19d1f71a46c105605d1a834e3c1"
+format = "zip"
+allow_patterns = ["*.zip", "**/*.zip"]
+label = "fake"
+generator = "novelai-v3"
+
+# The card has no annotation schema; the repository is explicitly a generated
+# Nano Banana consistency set, so all image archives are treated as fake.
+[[datasets]]
+name = "nano-consistent-150k"
+repo_id = "Yejy53/Nano-consistent-150k"
+revision = "107ce469bcfb2898702bfccfbb238cbcbab3e5d8"
+format = "tar"
+allow_patterns = ["*.tar", "*.tar.gz", "**/*.tar", "**/*.tar.gz"]
+label = "fake"
+generator = "nano-banana"
+
+# pre-2026 redirects to the canonical Omni-Fake-SET repository. Keep the
+# requested alias as repo_id and select only images (not masks/audio/video).
+[[datasets]]
+name = "omni-fake-set-images"
+repo_id = "JamalLee/pre-2026"
+revision = "724e97f5fc9f4b89f59631a8d4e6331712b7d441"
+format = "parquet"
+allow_patterns = ["data/Image/train-*.parquet", "data/Image/validation-*.parquet"]
+label = "column:label"
+generator = "column:generator"
+columns = { image = "image" }
+label_map = { real = "real", full_synthetic = "fake", tampered = "fake" }
+
+[[datasets]]
+name = "fakeclue"
+repo_id = "lingcco/FakeClue"
+revision = "f191249424986bded7e1d62fa7cab3a0c01d927f"
+format = "zip"
+allow_patterns = ["train.zip", "test.zip"]
+label = "fake"
+generator = "fakeclue"
+
+# The rows identify generated outputs (fake), but images are external URLs.
+# Keep the HF metadata snapshot without doing forbidden per-image downloads.
+[[datasets]]
+name = "anycrap"
+repo_id = "kafked/anycrap"
+revision = "bd1297fc0211e4531c86651d2cd55a4d069324af"
+format = "raw"
+download_only = true
+allow_patterns = ["data/full/train.jsonl"]
+label = "fake"
+generator = "anycrap"
+
+# SeaArt rows likewise point at generated images by external URL. Snapshot the
+# parquet index only; do not issue one request per image.
+[[datasets]]
+name = "seaart-hq"
+repo_id = "lehduong/seaart-hq"
+revision = "4321a586faf084ddfa6ab415caae4073af13aa67"
+format = "raw"
+download_only = true
+allow_patterns = ["*.parquet", "**/*.parquet"]
+label = "fake"
+generator = "seaart"
+
+[[datasets]]
+name = "niji-1-11"
+repo_id = "dsixteen/Niji_1_11"
+revision = "968d05dc6a74db4b6e7201752d408105c9533013"
+format = "parquet"
+allow_patterns = ["*.parquet", "**/*.parquet"]
+label = "fake"
+generator = "niji"
+columns = { image = "image" }
+
+[[datasets]]
+name = "lvlm-ood-fake-data"
+repo_id = "EricY05/lvlm-ood-fake-data"
+revision = "6d8de1692087e4b42f476541cb8e2b8015742b25"
+format = "imagefolder"
+allow_patterns = ["data/**"]
+image_dir = "data"
+label = "folder"
+generator = "lvlm-ood"
+label_map = { id_real = "real", ood_real = "real", fake_id = "fake", fake_ood = "fake" }
+
+# SDAIE publishes four differently-labelled parquet subsets in one repository.
+# Disjoint allow_patterns avoid downloading any payload more than once.
+[[datasets]]
+name = "sdaie-aigi-test"
+repo_id = "ThaneJoss/SDAIE"
+revision = "d4b72739c2bd1b67be422dce6439ff115b8fdc38"
+format = "parquet"
+allow_patterns = ["aigi_test/parquet/*.parquet"]
+label = "column:label_name"
+generator = "column:generator"
+columns = { image = "image" }
+assign_split = "test"
+
+[[datasets]]
+name = "sdaie-cnnspot-trainset"
+repo_id = "ThaneJoss/SDAIE"
+revision = "d4b72739c2bd1b67be422dce6439ff115b8fdc38"
+format = "parquet"
+allow_patterns = ["cnnspot_trainset/parquet/*.parquet"]
+label = "column:label_name"
+generator = "column:generator"
+columns = { image = "image" }
+
+[[datasets]]
+name = "sdaie-exif-pretrain"
+repo_id = "ThaneJoss/SDAIE"
+revision = "d4b72739c2bd1b67be422dce6439ff115b8fdc38"
+format = "parquet"
+allow_patterns = ["exif_pretrain/parquet/*.parquet"]
+label = "real"
+generator = "camera-metadata"
+columns = { image = "image" }
+
+
+[[datasets]]
+name = "sdaie-photographic-10k"
+repo_id = "ThaneJoss/SDAIE"
+revision = "d4b72739c2bd1b67be422dce6439ff115b8fdc38"
+format = "parquet"
+allow_patterns = ["photographic_10k/parquet/*.parquet"]
+label = "real"
+generator = "column:source_dataset"
+columns = { image = "image" }
+
+# shimei123/Genimage has no model-card body, but mirrors the official GenImage
+# archive layout: each generator has train/val `ai` and `nature` folders. Keep
+# the archives as disjoint logical datasets so generator provenance survives.
+[[datasets]]
+name = "genimage-adm"
+repo_id = "shimei123/Genimage"
+revision = "ed371660f5af74a165570a2234b9beea0abb81ef"
+format = "zip"
+allow_patterns = ["ADM.zip"]
+label = "folder"
+generator = "adm"
+label_map = { ai = "fake", nature = "real" }
+
+[[datasets]]
+name = "genimage-biggan"
+repo_id = "shimei123/Genimage"
+revision = "ed371660f5af74a165570a2234b9beea0abb81ef"
+format = "zip"
+allow_patterns = ["BigGAN.zip"]
+label = "folder"
+generator = "biggan"
+label_map = { ai = "fake", nature = "real" }
+
+[[datasets]]
+name = "genimage-midjourney-full"
+repo_id = "shimei123/Genimage"
+revision = "ed371660f5af74a165570a2234b9beea0abb81ef"
+format = "zip"
+allow_patterns = ["Midjourney.zip"]
+label = "folder"
+generator = "midjourney"
+label_map = { ai = "fake", nature = "real" }
+
+[[datasets]]
+name = "genimage-sd-v1-4"
+repo_id = "shimei123/Genimage"
+revision = "ed371660f5af74a165570a2234b9beea0abb81ef"
+format = "zip"
+allow_patterns = ["SD_v14.zip"]
+label = "folder"
+generator = "stable-diffusion-v1.4"
+label_map = { ai = "fake", nature = "real" }
+
+[[datasets]]
+name = "genimage-sd-v1-5"
+repo_id = "shimei123/Genimage"
+revision = "ed371660f5af74a165570a2234b9beea0abb81ef"
+format = "zip"
+allow_patterns = ["SD_v15.zip"]
+label = "folder"
+generator = "stable-diffusion-v1.5"
+label_map = { ai = "fake", nature = "real" }
+
+[[datasets]]
+name = "genimage-vqdm"
+repo_id = "shimei123/Genimage"
+revision = "ed371660f5af74a165570a2234b9beea0abb81ef"
+format = "zip"
+allow_patterns = ["VQDM.zip"]
+label = "folder"
+generator = "vqdm"
+label_map = { ai = "fake", nature = "real" }
+
+[[datasets]]
+name = "genimage-glide"
+repo_id = "shimei123/Genimage"
+revision = "ed371660f5af74a165570a2234b9beea0abb81ef"
+format = "zip"
+allow_patterns = ["glide.zip"]
+label = "folder"
+generator = "glide"
+label_map = { ai = "fake", nature = "real" }
+
+[[datasets]]
+name = "genimage-wukong"
+repo_id = "shimei123/Genimage"
+revision = "ed371660f5af74a165570a2234b9beea0abb81ef"
+format = "zip"
+allow_patterns = ["wukong.zip"]
+label = "folder"
+generator = "wukong"
+label_map = { ai = "fake", nature = "real" }
+
+[[datasets]]
+name = "so-fake-set"
+repo_id = "saberzl/So-Fake-Set"
+revision = "c041015e5480233431a1857c89753db332c3a4ab"
+format = "parquet"
+allow_patterns = ["data/train-*.parquet", "data/validation-*.parquet"]
+label = "column:label"
+generator = "column:generator"
+columns = { image = "image" }
+label_map = { real = "real", full_synthetic = "fake", tampered = "fake" }
+
+# The original archive contains the supplied train/validation images. The
+# separate redigital archive is the repository's held-out test corpus.
+[[datasets]]
+name = "rrdataset-original"
+repo_id = "alecrespi/RRDataset-CV-Project2"
+revision = "972a31ea4b860eb6e6440616de5c17559a1f368e"
+format = "tar"
+allow_patterns = ["RRDataset_original_train_val.tar.gz"]
+label = "folder"
+generator = "rrdataset-original"
+label_map = { ai = "fake", real = "real" }
+
+[[datasets]]
+name = "rrdataset-redigital-test"
+repo_id = "alecrespi/RRDataset-CV-Project2"
+revision = "972a31ea4b860eb6e6440616de5c17559a1f368e"
+format = "tar"
+allow_patterns = ["RRDataset_test.tar.gz"]
+label = "folder"
+generator = "redigital"
+label_map = { ai = "fake", real = "real" }
+assign_split = "test"
+
+# The card defines this repository as evaluation-only. Its physical ClassLabel
+# values are 0=real, 1=tampered, 2=full_synthetic.
+[[datasets]]
+name = "so-fake-ood"
+repo_id = "saberzl/So-Fake-OOD"
+revision = "ebd15187bea9e82ddc83e3d27aea58147e9224fb"
+format = "parquet"
+allow_patterns = ["data/test-*.parquet"]
+label = "column:label"
+generator = "column:generator"
+columns = { image = "image" }
+label_map = { "0" = "real", "1" = "fake", "2" = "fake", real = "real", tampered = "fake", full_synthetic = "fake" }
+assign_split = "test"

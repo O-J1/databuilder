@@ -16,6 +16,7 @@ from databuilder.config import (  # noqa: E402
     DaftConfig,
     DatasetConfig,
     DedupConfig,
+    DownloadConfig,
     FiltersConfig,
     RuntimeConfig,
 )
@@ -30,6 +31,7 @@ def make_ctx(tmp_path):
         clustering: ClusteringConfig | None = None,
         balance: BalanceConfig | None = None,
         dedup: DedupConfig | None = None,
+        download: DownloadConfig | None = None,
         daft: DaftConfig | None = None,
         dry_run: bool = False,
         world_size: int = 1,
@@ -44,6 +46,8 @@ def make_ctx(tmp_path):
             kwargs["balance"] = balance
         if dedup is not None:
             kwargs["dedup"] = dedup
+        if download is not None:
+            kwargs["download"] = download
         if daft is not None:
             kwargs["daft"] = daft
         cfg = Config(

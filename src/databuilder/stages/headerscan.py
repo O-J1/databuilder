@@ -14,6 +14,7 @@ from .common import (
     iter_dataset_images,
     load_layout,
     protected_datasets,
+    pipeline_datasets,
     resolve_meta,
     uses_folder_labels,
 )
@@ -74,7 +75,8 @@ def _inspect(abs_path: str) -> tuple[int, int, int, str]:
 def run(ctx: RunContext) -> None:
     filters = ctx.cfg.filters
     tall, wide = filters.tall_ratio, filters.wide_ratio
-    layouts = {ds.name: load_layout(ctx.cfg, ds) for ds in ctx.cfg.datasets}
+    datasets = pipeline_datasets(ctx.cfg)
+    layouts = {ds.name: load_layout(ctx.cfg, ds) for ds in datasets}
     protected = protected_datasets(ctx.cfg)
     if protected:
         log.info("in-place source datasets protected from deletion: %s", sorted(protected))
@@ -108,7 +110,7 @@ def run(ctx: RunContext) -> None:
                     if ds_name not in protected:
                         ctx.remove_file(abs_path)
                     continue
-                ds = next(d for d in ctx.cfg.datasets if d.name == ds_name)
+                ds = next(d for d in datasets if d.name == ds_name)
                 rel_parts = Path(rel).parts[1:]  # strip dataset dir
                 label, generator = resolve_meta(ds, rel_parts, layouts[ds_name])
                 if label == "unknown" and uses_folder_labels(ds):
@@ -132,7 +134,7 @@ def run(ctx: RunContext) -> None:
                 stats["kept"] += 1
             batch.clear()
 
-        for ds in ctx.cfg.datasets:
+        for ds in datasets:
             root = dataset_root(ctx.cfg, ds)
             for abs_path in iter_dataset_images(root, ds):
                 rel = f"{ds.name}/{normalize_relpath(abs_path.relative_to(root))}"
