@@ -16,6 +16,7 @@ DATASET_FORMATS = {
     "zip",
     "tar",
     "webdataset",
+    "multipart_tar",
     "multipart_zip",
     "imagefolder",
     "raw",

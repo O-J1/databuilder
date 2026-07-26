@@ -33,7 +33,7 @@ snapshot is retained but they cannot silently enter the labelled manifest.
 | [Skywork/unipic_seedream_6images](https://huggingface.co/datasets/Skywork/unipic_seedream_6images) | fake only | `seedream` | Only `output_image` is extracted. |
 | [Skywork/unipic_nano_2images](https://huggingface.co/datasets/Skywork/unipic_nano_2images) | fake only | `nano-banana` | Only the generated `output_image`, not input references, is extracted. |
 | [Skywork/unipic_nano_3images](https://huggingface.co/datasets/Skywork/unipic_nano_3images) | fake only | `nano-banana` | Only the generated `output_image` is extracted. |
-| [terminusresearch/ideogram-75k](https://huggingface.co/datasets/terminusresearch/ideogram-75k) | fake only | `ideogram` | Generated-image tar archives. |
+| [terminusresearch/ideogram-75k](https://huggingface.co/datasets/terminusresearch/ideogram-75k) | fake only | `ideogram` | Generated images stored as numbered chunks of one tar stream; `multipart_tar` reads across chunk boundaries without creating a combined temporary archive. |
 | [deepthink8/kling-ai-images](https://huggingface.co/datasets/deepthink8/kling-ai-images) | fake only | `kling` | The config selects archives under the fake image tree. |
 | [nyuuzyou/klingai](https://huggingface.co/datasets/nyuuzyou/klingai) | fake only | `kling` | Only `resource_*.zip` image payloads are selected; cover and video metadata are excluded. |
 | [hastylol/nai3](https://huggingface.co/datasets/hastylol/nai3) | fake only | `novelai-v3` | NAI v3 generated-image zips. |

@@ -116,7 +116,7 @@ def _materialize(ctx: RunContext, ds: DatasetConfig, target: Path) -> dict:
         return _materialize_jsonl(ctx, ds, source_dir, target)
     if fmt == "zip":
         return _materialize_zip(ds, source_dir, target)
-    if fmt in {"tar", "webdataset"}:
+    if fmt in {"tar", "webdataset", "multipart_tar"}:
         return _materialize_tar(ds, source_dir, target, fmt)
     if fmt == "multipart_zip":
         return _materialize_multipart_zip(ds, source_dir, target)
@@ -528,24 +528,60 @@ def _materialize_tar(
     archives = _tar_files(source_dir)
     if not archives:
         raise ConfigError(f"dataset {ds.name!r}: no tar files under {source_dir}")
+
+    if fmt == "multipart_tar":
+        # Some repositories use `split` to cut one tar byte stream into numbered
+        # .tar chunks. Present those chunks as one seekable file without writing
+        # a second, enormous combined archive to disk.
+        out_dir = target / safe_name(
+            archives[0].name.removesuffix(".tar.gz").removesuffix(".tgz").removesuffix(".tar")
+        )
+        joined = _MultipartFile(archives)
+        try:
+            with tarfile.open(fileobj=joined, mode="r:*") as archive:
+                extracted += _extract_tar_images(archive, out_dir)
+        except tarfile.ReadError as exc:
+            raise ConfigError(
+                f"dataset {ds.name!r}: concatenated tar stream is unreadable across "
+                f"{len(archives)} chunks under {source_dir}"
+            ) from exc
+        finally:
+            joined.close()
+        for tar_path in archives:
+            _discard_source(ds, tar_path)
+        return {"format": fmt, "written": extracted, "parts": len(archives)}
+
     for tar_path in archives:
         stem = tar_path.name.removesuffix(".tar.gz").removesuffix(".tgz").removesuffix(".tar")
         out_dir = target / safe_name(stem)
-        with tarfile.open(tar_path, "r:*") as archive:
-            for member in archive:
-                if not member.isfile() or Path(member.name).suffix.lower() not in IMAGE_SUFFIXES:
-                    continue
-                dest = _safe_destination(out_dir, member.name)
-                src = archive.extractfile(member)
-                if dest is None or src is None:
-                    log.warning("skipping unsafe/unreadable tar entry %r", member.name)
-                    continue
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                with src, dest.open("wb") as dst:
-                    shutil.copyfileobj(src, dst)
-                extracted += 1
+        try:
+            with tarfile.open(tar_path, "r:*") as archive:
+                extracted += _extract_tar_images(archive, out_dir)
+        except tarfile.ReadError as exc:
+            raise ConfigError(
+                f"dataset {ds.name!r}: tar archive {tar_path} is unreadable. "
+                "If these are numbered chunks of one tar stream, set "
+                "format = 'multipart_tar'."
+            ) from exc
         _discard_source(ds, tar_path)
     return {"format": fmt, "written": extracted}
+
+
+def _extract_tar_images(archive: tarfile.TarFile, out_dir: Path) -> int:
+    extracted = 0
+    for member in archive:
+        if not member.isfile() or Path(member.name).suffix.lower() not in IMAGE_SUFFIXES:
+            continue
+        dest = _safe_destination(out_dir, member.name)
+        src = archive.extractfile(member)
+        if dest is None or src is None:
+            log.warning("skipping unsafe/unreadable tar entry %r", member.name)
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with src, dest.open("wb") as dst:
+            shutil.copyfileobj(src, dst)
+        extracted += 1
+    return extracted
 
 
 class _MultipartFile(io.RawIOBase):

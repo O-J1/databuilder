@@ -222,7 +222,7 @@ def test_aigc_production_config_is_pinned_and_snapshot_only():
     cfg = load_config(path)
     assert cfg.runtime.data_dir.as_posix() == "/p/data1/datasets/mmlaion/aigc/data"
     assert cfg.download.max_workers == 1
-    assert cfg.download.xet_high_performance is True
+    assert cfg.download.xet_high_performance is False
     assert len(cfg.datasets) == 51
     assert len({ds.repo_id for ds in cfg.datasets}) == 40
     assert all(ds.revision for ds in cfg.datasets)
@@ -269,3 +269,6 @@ def test_aigc_production_config_is_pinned_and_snapshot_only():
             "SANA",
         )
     }
+
+    ideogram = next(ds for ds in cfg.datasets if ds.name == "ideogram-75k")
+    assert ideogram.format == "multipart_tar"

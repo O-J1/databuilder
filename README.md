@@ -190,8 +190,9 @@ See [examples/build.example.toml](examples/build.example.toml). Key sections:
   comparisons are case-insensitive).
   `images = [{ column = "image1", generator_column = "model1" }, ...]` maps
   tables with multiple image fields. Supported materializers are parquet,
-  Arrow, JSONL with local image paths, zip, tar/WebDataset, split zip,
-  imagefolder, and `raw`. External image URLs are never fetched individually.
+  Arrow, JSONL with local image paths, zip, tar/WebDataset, concatenated
+  `multipart_tar` chunks, split zip, imagefolder, and `raw`. External image
+  URLs are never fetched individually.
   `download_only = true` with `format = "raw"` retains a snapshot but excludes
   it from headerscan and every downstream manifest stage. `source_split` picks
   the HF split to download; `assign_split = "test"` forces

@@ -4,6 +4,7 @@ import io
 import json
 import os
 import sys
+import tarfile
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -306,3 +307,34 @@ def test_multipart_zip_extracts_only_selected_output(tmp_path, make_ctx):
     target = ctx.data_dir / "multipart"
     assert (target / "outputs" / "fake.png").is_file()
     assert not (target / "inputs" / "real.png").exists()
+
+
+def test_multipart_tar_reads_members_across_chunk_boundaries(tmp_path, make_ctx):
+    source = tmp_path / "multipart-tar"
+    source.mkdir()
+    archive_bytes = io.BytesIO()
+    with tarfile.open(fileobj=archive_bytes, mode="w") as archive:
+        for name in ("first.png", "second.png"):
+            payload = _png_bytes()
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+    payload = archive_bytes.getvalue()
+    # Split inside the first member payload so neither part is independently usable.
+    midpoint = 512 + len(_png_bytes()) // 2
+    (source / "images_0000.tar").write_bytes(payload[:midpoint])
+    (source / "images_0001.tar").write_bytes(payload[midpoint:])
+    ds = DatasetConfig(
+        name="multipart-tar",
+        path=str(source),
+        format="multipart_tar",
+        label="fake",
+        generator="test-generator",
+    )
+    ctx = make_ctx(datasets=(ds,))
+    download.run(ctx)
+
+    target = ctx.data_dir / "multipart-tar"
+    assert sorted(path.name for path in target.rglob("*.png")) == ["first.png", "second.png"]
+    marker = json.loads((target / MATERIALIZED_MARKER).read_text(encoding="utf-8"))
+    assert marker == {"format": "multipart_tar", "written": 2, "parts": 2}
