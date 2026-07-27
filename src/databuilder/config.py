@@ -75,13 +75,41 @@ class DownloadConfig:
     """Hugging Face snapshot concurrency controls."""
 
     max_workers: int = 1
-    xet_high_performance: bool = False
+    staging_dir: Path | None = None
+    retain_snapshots: bool = False
+    retain_xet_cache: bool = False
 
     def __post_init__(self) -> None:
+        if self.staging_dir is not None:
+            object.__setattr__(self, "staging_dir", Path(self.staging_dir))
         if self.max_workers < 1:
             raise ConfigError("download.max_workers must be >= 1")
-        if not isinstance(self.xet_high_performance, bool):
-            raise ConfigError("download.xet_high_performance must be true or false")
+        if not isinstance(self.retain_snapshots, bool):
+            raise ConfigError("download.retain_snapshots must be true or false")
+        if not isinstance(self.retain_xet_cache, bool):
+            raise ConfigError("download.retain_xet_cache must be true or false")
+
+
+@dataclass(frozen=True)
+class StorageConfig:
+    """Canonical WebDataset storage settings."""
+
+    # WebDataset's own ShardWriter defaults are a performance-oriented 3 GB
+    # and 100k samples. Both remain configurable for filesystem-specific tuning.
+    backend: str = "webdataset"
+    target_shard_bytes: int = 3_000_000_000
+    max_samples_per_shard: int = 100_000
+    compact_after_manifest: bool = False
+
+    def __post_init__(self) -> None:
+        if self.backend != "webdataset":
+            raise ConfigError("storage.backend must be 'webdataset'")
+        if self.target_shard_bytes < 1_048_576:
+            raise ConfigError("storage.target_shard_bytes must be at least 1048576")
+        if self.max_samples_per_shard < 1:
+            raise ConfigError("storage.max_samples_per_shard must be >= 1")
+        if not isinstance(self.compact_after_manifest, bool):
+            raise ConfigError("storage.compact_after_manifest must be true or false")
 
 
 @dataclass(frozen=True)
@@ -376,6 +404,7 @@ class DatasetConfig:
 class Config:
     runtime: RuntimeConfig
     download: DownloadConfig = field(default_factory=DownloadConfig)
+    storage: StorageConfig = field(default_factory=StorageConfig)
     filters: FiltersConfig = field(default_factory=FiltersConfig)
     dedup: DedupConfig = field(default_factory=DedupConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
@@ -416,6 +445,7 @@ def load_config(path: Path | str, overrides: dict[str, Any] | None = None) -> Co
 
     sections = {
         "download": DownloadConfig,
+        "storage": StorageConfig,
         "filters": FiltersConfig,
         "dedup": DedupConfig,
         "embedding": EmbeddingConfig,

@@ -10,7 +10,15 @@ num_workers = 16
 [download]
 # One Hugging Face snapshot worker means one dataset-file transfer at a time.
 max_workers = 1
-xet_high_performance = false
+staging_dir = "na"
+retain_snapshots = false
+retain_xet_cache = false
+
+[storage]
+# WebDataset's performance-oriented defaults: ~3 GB or 100k samples per shard.
+target_shard_bytes = 3000000000
+max_samples_per_shard = 100000
+compact_after_manifest = true
 
 [[datasets]]
 name = "nijijourney-v6-520k-raw"
@@ -25,7 +33,7 @@ generator = "nijijourney-v6"
 name = "midjourney-v6-520k-raw"
 repo_id = "terminusresearch/midjourney-v6-520k-raw"
 revision = "b6e818fde4458b741b6a8ffe347d2ec4517889ff"
-format = "tar"
+format = "multipart_tar"
 allow_patterns = ["*.tar", "*.tar.gz", "**/*.tar", "**/*.tar.gz"]
 label = "fake"
 generator = "midjourney-v6"

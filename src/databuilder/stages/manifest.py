@@ -6,11 +6,13 @@ import random
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.dataset as pa_ds
 import pyarrow.parquet as pq
 
 from ..config import CSV_MAX_ROWS
 from ..state import RunContext
 from ..utils import ParquetShardWriter, iter_parquet_batches
+from ..wds import compact_dataset, is_webdataset, iter_index, load_marker
 from .common import dataset_roots, normalize_label, pipeline_datasets, resolve_abs_from_roots
 
 log = logging.getLogger("databuilder.manifest")
@@ -28,6 +30,10 @@ MANIFEST_SCHEMA = pa.schema(
         ("image_id", pa.uint64()),
         ("file_hash", pa.string()),
         ("laplacian", pa.float64()),
+        ("shard", pa.string()),
+        ("member", pa.string()),
+        ("offset", pa.int64()),
+        ("size", pa.int64()),
     ]
 )
 _MASK = (1 << 64) - 1
@@ -265,11 +271,23 @@ def run(ctx: RunContext) -> None:
                     "image_id": image_id,
                     "file_hash": f"{row['file_hash']:016x}",
                     "laplacian": row["laplacian"],
+                    "shard": row.get("shard") or "",
+                    "member": row.get("member") or "",
+                    "offset": int(row.get("offset") or 0),
+                    "size": int(row.get("size") or row["filesize"]),
                 }
                 writer.append(record)
                 rows_total += 1
                 if balance.emit_csv and rows_total <= CSV_MAX_ROWS:
                     csv_rows.append(record)
+
+    if ctx.cfg.storage.compact_after_manifest and not ctx.dry_run:
+        locator_maps = _compact_and_rewrite(ctx, parquet_path, keep_maps=bool(csv_rows))
+        for record in csv_rows:
+            locator = locator_maps.get(record["source_dataset"], {}).get(record["path"])
+            if locator:
+                for key in ("shard", "member", "offset", "size"):
+                    record[key] = locator[key]
 
     if balance.emit_csv:
         if rows_total > CSV_MAX_ROWS:
@@ -287,3 +305,55 @@ def run(ctx: RunContext) -> None:
                 writer_csv.writerows(csv_rows)
             log.info("wrote %s", csv_path)
     log.info("manifest done: %d rows -> %s", rows_total, parquet_path)
+
+
+def _compact_and_rewrite(
+    ctx: RunContext, manifest_path, *, keep_maps: bool
+) -> dict[str, dict[str, dict]]:
+    """Compact canonical shards, then refresh manifest member offsets."""
+    source = pa_ds.dataset(str(manifest_path), format="parquet")
+    locator_maps: dict[str, dict[str, dict]] = {}
+    partial = manifest_path.with_name(manifest_path.name + ".partial")
+    writer = pq.ParquetWriter(partial, MANIFEST_SCHEMA)
+    try:
+        for ds in pipeline_datasets(ctx.cfg):
+            root = ctx.cfg.runtime.data_dir / ds.name
+            selected: set[str] = set()
+            selected_scanner = source.scanner(
+                columns=["path"], filter=pa_ds.field("source_dataset") == ds.name,
+                batch_size=8192,
+            )
+            for batch in selected_scanner.to_batches():
+                selected.update(batch.column("path").to_pylist())
+            locators: dict[str, dict] = {}
+            storage_state = load_marker(root)
+            if is_webdataset(root) or (
+                storage_state.get("storage") == "webdataset"
+                and storage_state.get("state") == "compacting"
+            ):
+                stats = compact_dataset(root, selected)
+                log.info("compacted dataset %r: %s", ds.name, stats)
+                locators = {
+                    row["path"]: row
+                    for row in iter_index(
+                        root, columns=["path", "shard", "member", "offset", "size"]
+                    )
+                }
+                if keep_maps:
+                    locator_maps[ds.name] = locators
+            rows_scanner = source.scanner(
+                filter=pa_ds.field("source_dataset") == ds.name, batch_size=8192
+            )
+            for batch in rows_scanner.to_batches():
+                rows = batch.to_pylist()
+                for row in rows:
+                    locator = locators.get(row["path"])
+                    if locator:
+                        for key in ("shard", "member", "offset", "size"):
+                            row[key] = locator[key]
+                writer.write_table(pa.Table.from_pylist(rows, schema=MANIFEST_SCHEMA))
+            del locators, selected
+    finally:
+        writer.close()
+    partial.replace(manifest_path)
+    return locator_maps

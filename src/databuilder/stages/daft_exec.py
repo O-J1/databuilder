@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ..config import Config
 from ..utils import owns
+from ..wds import read_image_bytes
 
 log = logging.getLogger("databuilder.daft")
 
@@ -72,6 +73,29 @@ def make_abs_path_udf(daft, roots: dict[str, str]):
     return to_abs
 
 
+def make_image_bytes_udf(daft, roots: dict[str, str]):
+    """Read a loose file or an indexed member of an uncompressed tar shard."""
+
+    @daft.func(return_dtype=daft.DataType.binary())
+    def read_ref(path: str, dataset: str, shard: str, member: str, offset: int, size: int):
+        try:
+            return read_image_bytes(
+                {
+                    "path": path,
+                    "dataset": dataset,
+                    "shard": shard,
+                    "member": member,
+                    "offset": offset,
+                    "size": size,
+                },
+                roots,
+            )
+        except Exception:  # noqa: BLE001 - Daft turns unreadable rows into nulls
+            return None
+
+    return read_ref
+
+
 def make_pil_decode_udf(daft):
     """Fallback decoder for formats Daft's Rust decoder rejects (HEIC/AVIF/JXL)."""
 
@@ -125,11 +149,17 @@ def with_downloaded_image(daft, df, roots: dict[str, str]):
     undecodable rows get a null 'image'.
     """
     from daft import col
-    from daft.functions import decode_image, download, regexp
+    from daft.functions import decode_image, regexp
 
-    to_abs = make_abs_path_udf(daft, roots)
+    read_ref = make_image_bytes_udf(daft, roots)
     pil_decode = make_pil_decode_udf(daft)
-    df = df.with_column("data", download(to_abs(col("path")), on_error="null"))
+    df = df.with_column(
+        "data",
+        read_ref(
+            col("path"), col("dataset"), col("shard"), col("member"),
+            col("offset"), col("size"),
+        ),
+    )
     is_native = regexp(col("path"), NATIVE_DECODABLE_RE)
     native = df.where(is_native).with_column(
         "image", decode_image(col("data"), on_error="null", mode="RGB")

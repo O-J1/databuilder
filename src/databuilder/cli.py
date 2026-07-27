@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import logging
 import os
 import sys
@@ -123,6 +124,35 @@ def cmd_stage(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_storage(args: argparse.Namespace) -> int:
+    """Inspect or migrate local storage without contacting Hugging Face."""
+    from .stages.download import inventory, migrate_existing
+
+    cfg = load_config(args.config, {"rank": 0, "world_size": 1})
+    ctx = RunContext(cfg=cfg, dry_run=args.dry_run)
+    if args.action == "compact":
+        if args.dry_run:
+            rows = inventory(ctx)
+        else:
+            from .stages.manifest import _compact_and_rewrite
+
+            manifest = ctx.work_dir / "artifacts" / "manifest" / "manifest.parquet"
+            if not manifest.is_file():
+                raise ConfigError(f"manifest missing: {manifest}")
+            _compact_and_rewrite(ctx, manifest, keep_maps=False)
+            rows = [{"status": "compacted", "manifest": str(manifest)}]
+    elif args.action == "inventory" or args.dry_run:
+        rows = inventory(ctx)
+    else:
+        rows = migrate_existing(ctx)
+    for row in rows:
+        print(json.dumps(row, ensure_ascii=False))
+    needs_download = sum(row.get("status") in {"missing", "needs_download"} for row in rows)
+    if needs_download:
+        log.warning("%d dataset(s) have no locally recoverable source", needs_download)
+    return 0
+
+
 def _resolve_work_dir(args: argparse.Namespace) -> Path:
     if args.work_dir:
         return Path(args.work_dir)
@@ -218,6 +248,21 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(stage_p)
     stage_p.add_argument("--wait", action="store_true", help="Wait for required stages.")
     stage_p.set_defaults(func=cmd_stage)
+
+    storage_p = sub.add_parser(
+        "storage", help="Inventory or migrate existing data without network access."
+    )
+    storage_p.add_argument("action", choices=("inventory", "migrate", "compact"))
+    storage_p.add_argument("--config", required=True)
+    storage_p.add_argument(
+        "--existing-only",
+        action="store_true",
+        help="Explicitly document that migration must not download (always enforced).",
+    )
+    storage_p.add_argument(
+        "--dry-run", action="store_true", help="Print inventory; do not migrate."
+    )
+    storage_p.set_defaults(func=cmd_storage)
 
     vp = sub.add_parser("viz-prepare", help="Sample embeddings and project to 2D for the viewer.")
     vp.add_argument("--config", default=None)

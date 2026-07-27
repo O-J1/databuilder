@@ -17,6 +17,7 @@ from databuilder.config import ConfigError, DatasetConfig, DownloadConfig, Image
 from databuilder.stages import download
 from databuilder.stages.common import MATERIALIZED_MARKER, load_layout, pipeline_datasets
 from databuilder.stages.download import resolve_columns
+from databuilder.wds import ImageRef, is_webdataset, iter_index
 
 
 def _schema(**fields) -> pa.Schema:
@@ -74,6 +75,14 @@ def _png_bytes() -> bytes:
     return buffer.getvalue()
 
 
+def _wds_rows(target: Path) -> list[dict]:
+    assert is_webdataset(target)
+    assert not any(
+        path.suffix.lower() in {".png", ".jpg", ".jpeg"} for path in target.rglob("*")
+    )
+    return list(iter_index(target))
+
+
 def test_materialize_local_parquet_with_layout_marker(tmp_path, make_ctx):
     source = tmp_path / "parquet-src"
     source.mkdir()
@@ -92,11 +101,13 @@ def test_materialize_local_parquet_with_layout_marker(tmp_path, make_ctx):
     download.run(ctx)
 
     target = ctx.data_dir / "localpq"
-    written = sorted(p.relative_to(target).as_posix() for p in target.rglob("*.png"))
+    rows = _wds_rows(target)
+    written = sorted(row["path"].partition("/")[2] for row in rows)
     assert written == [
         "fake/sd15/localpq_00000_000000001.png",
         "real/camera/localpq_00000_000000000.png",
     ]
+    assert all(ImageRef.from_row(row).read_bytes({"localpq": str(target)}) == png for row in rows)
     # local source parquet is never deleted
     assert (source / "part0.parquet").exists()
     # automatched layout is recorded and read back for resolve_meta
@@ -131,7 +142,7 @@ def test_null_dynamic_generator_materializes_as_unknown(tmp_path, make_ctx):
     download.run(ctx)
 
     target = ctx.data_dir / "nullable-generator"
-    written = [path.relative_to(target).as_posix() for path in target.rglob("*.png")]
+    written = [row["path"].partition("/")[2] for row in _wds_rows(target)]
     assert written == ["real/unknown/nullable-generator_00000_000000000.png"]
 
 
@@ -164,20 +175,24 @@ def test_materialize_parquet_excludes_configured_rows_case_insensitively(
     download.run(ctx)
 
     target = ctx.data_dir / "excluded-models"
-    written = [path.relative_to(target).as_posix() for path in target.rglob("*.png")]
+    written = [row["path"].partition("/")[2] for row in _wds_rows(target)]
     assert written == ["fake/good-model/excluded-models_00000_000000000.png"]
     marker = json.loads((target / MATERIALIZED_MARKER).read_text(encoding="utf-8"))
     assert marker["filtered"] == 2
 
 
-def test_snapshot_download_is_rank0_single_worker_and_stays_in_data_dir(
+def test_snapshot_download_is_rank0_single_worker_and_uses_ephemeral_staging(
     tmp_path, make_ctx, monkeypatch
 ):
     calls = []
 
     def fake_snapshot_download(**kwargs):
         calls.append(kwargs)
-        Path(kwargs["local_dir"]).mkdir(parents=True)
+        Path(kwargs["local_dir"]).mkdir(parents=True, exist_ok=True)
+        (Path(kwargs["local_dir"]) / "metadata.json").write_text("{}", encoding="utf-8")
+        cache = Path(kwargs["local_dir"]) / ".cache" / "huggingface" / "download"
+        cache.mkdir(parents=True)
+        (cache / "metadata.json.lock").write_text("cache", encoding="utf-8")
         return str(kwargs["local_dir"])
 
     monkeypatch.setitem(
@@ -196,7 +211,7 @@ def test_snapshot_download_is_rank0_single_worker_and_stays_in_data_dir(
     )
     ctx = make_ctx(
         datasets=(ds,),
-        download=DownloadConfig(xet_high_performance=True),
+        download=DownloadConfig(staging_dir=tmp_path / "staging"),
         world_size=8,
         rank=0,
     )
@@ -205,13 +220,20 @@ def test_snapshot_download_is_rank0_single_worker_and_stays_in_data_dir(
     assert len(calls) == 1
     call = calls[0]
     assert call["max_workers"] == 1
-    assert Path(call["local_dir"]) == ctx.data_dir / ds.name
-    assert Path(call["local_dir"]).is_relative_to(ctx.data_dir)
+    assert Path(call["local_dir"]) == tmp_path / "staging" / ".hf_snapshots" / ds.name
     assert "cache_dir" not in call  # local_dir owns its HF metadata cache
-    assert os.environ["HF_XET_CACHE"] == str(ctx.data_dir / ".hf_xet")
+    assert os.environ["HF_XET_CACHE"] == str(tmp_path / "staging" / ".hf_xet")
     assert "HF_XET_NUM_CONCURRENT_RANGE_GETS" not in os.environ
-    assert os.environ["HF_XET_HIGH_PERFORMANCE"] == "1"
+    assert "HF_XET_HIGH_PERFORMANCE" not in os.environ
     assert (ctx.data_dir / ds.name / MATERIALIZED_MARKER).exists()
+    marker = json.loads((ctx.data_dir / ds.name / MATERIALIZED_MARKER).read_text())
+    assert marker["storage"] == "raw_tar"
+    archive_path = ctx.data_dir / ds.name / marker["archive"]
+    assert archive_path.is_file()
+    with tarfile.open(archive_path) as archive:
+        assert [member.name for member in archive if member.isfile()] == ["metadata.json"]
+    assert not Path(call["local_dir"]).exists()
+    assert not (tmp_path / "staging" / ".hf_xet").exists()
     assert pipeline_datasets(ctx.cfg) == ()
 
     rank1 = make_ctx(datasets=(ds,), world_size=8, rank=1)
@@ -248,7 +270,7 @@ def test_materialize_multiple_image_columns_with_generators(tmp_path, make_ctx):
     ctx = make_ctx(datasets=(ds,))
     download.run(ctx)
     target = ctx.data_dir / "pairs"
-    written = sorted(path.relative_to(target).as_posix() for path in target.rglob("*.png"))
+    written = sorted(row["path"].partition("/")[2] for row in _wds_rows(target))
     assert written == [
         "generator-a/pairs_00000_000000000_i0.png",
         "generator-b/pairs_00000_000000001_i1.png",
@@ -274,7 +296,7 @@ def test_materialize_arrow_stream(tmp_path, make_ctx):
     )
     ctx = make_ctx(datasets=(ds,))
     download.run(ctx)
-    assert len(list((ctx.data_dir / "arrow-images").rglob("*.png"))) == 1
+    assert len(_wds_rows(ctx.data_dir / "arrow-images")) == 1
 
 
 def test_multipart_zip_extracts_only_selected_output(tmp_path, make_ctx):
@@ -305,8 +327,7 @@ def test_multipart_zip_extracts_only_selected_output(tmp_path, make_ctx):
     ctx = make_ctx(datasets=(ds,))
     download.run(ctx)
     target = ctx.data_dir / "multipart"
-    assert (target / "outputs" / "fake.png").is_file()
-    assert not (target / "inputs" / "real.png").exists()
+    assert [row["path"] for row in _wds_rows(target)] == ["multipart/outputs/fake.png"]
 
 
 def test_multipart_tar_reads_members_across_chunk_boundaries(tmp_path, make_ctx):
@@ -335,6 +356,11 @@ def test_multipart_tar_reads_members_across_chunk_boundaries(tmp_path, make_ctx)
     download.run(ctx)
 
     target = ctx.data_dir / "multipart-tar"
-    assert sorted(path.name for path in target.rglob("*.png")) == ["first.png", "second.png"]
+    assert sorted(Path(row["path"]).name for row in _wds_rows(target)) == [
+        "first.png", "second.png"
+    ]
     marker = json.loads((target / MATERIALIZED_MARKER).read_text(encoding="utf-8"))
-    assert marker == {"format": "multipart_tar", "written": 2, "parts": 2}
+    assert marker["format"] == "multipart_tar"
+    assert marker["written"] == 2
+    assert marker["parts"] == 2
+    assert marker["storage"] == "webdataset"

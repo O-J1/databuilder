@@ -10,7 +10,8 @@ import xxhash
 
 from ..state import RunContext
 from ..utils import ParquetShardWriter, iter_parquet_batches
-from .common import dataset_roots, protected_datasets, resolve_abs_from_roots
+from ..wds import read_image_bytes
+from .common import archived_row, dataset_roots, protected_datasets, resolve_abs_from_roots
 from .headerscan import KEPT_SCHEMA, REMOVED_SCHEMA, _init_worker
 
 log = logging.getLogger("databuilder.fingerprint")
@@ -41,15 +42,15 @@ def _pack_hash(hash_obj) -> bytes:
     return np.packbits(bits).tobytes()
 
 
-def _fingerprint(abs_path: str) -> dict:
+def _fingerprint(item: tuple[dict, dict[str, str]]) -> dict:
     """Full-decode pass: xxh3 file hash + 12x12 phash + colorhash + Laplacian variance."""
     import cv2
     import imagehash
     from PIL import Image
 
     try:
-        with open(abs_path, "rb") as handle:
-            data = handle.read()
+        row, roots = item
+        data = read_image_bytes(row, roots)
         file_hash = xxhash.xxh3_64_intdigest(data)
         with Image.open(io.BytesIO(data)) as img:
             img = img.convert("RGB")
@@ -99,8 +100,8 @@ def _run_legacy(ctx: RunContext) -> None:
         pending: list[dict] = []
 
         def flush() -> None:
-            paths = [str(resolve_abs_from_roots(roots, row["path"])) for row in pending]
-            for row, result in zip(pending, pool.map(_fingerprint, paths, chunksize=16)):
+            items = [(row, roots) for row in pending]
+            for row, result in zip(pending, pool.map(_fingerprint, items, chunksize=16)):
                 reason = ""
                 if result["error"]:
                     reason = "broken_decode"
@@ -114,7 +115,7 @@ def _run_legacy(ctx: RunContext) -> None:
                     removed.append(
                         {"path": row["path"], "dataset": row["dataset"], "reason": reason}
                     )
-                    if row["dataset"] not in protected:
+                    if not archived_row(row) and row["dataset"] not in protected:
                         ctx.remove_file(resolve_abs_from_roots(roots, row["path"]))
                     continue
                 kept.append(
@@ -194,7 +195,7 @@ def _run_daft(ctx: RunContext) -> None:
                 continue
             stats["broken" if reason == "broken_decode" else reason] += 1
             removed.append({"path": row["path"], "dataset": row["dataset"], "reason": reason})
-            if row["dataset"] not in protected:
+            if not archived_row(row) and row["dataset"] not in protected:
                 ctx.remove_file(resolve_abs_from_roots(roots, row["path"]))
 
     log.info(

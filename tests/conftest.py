@@ -19,6 +19,7 @@ from databuilder.config import (  # noqa: E402
     DownloadConfig,
     FiltersConfig,
     RuntimeConfig,
+    StorageConfig,
 )
 from databuilder.state import RunContext  # noqa: E402
 
@@ -32,6 +33,7 @@ def make_ctx(tmp_path):
         balance: BalanceConfig | None = None,
         dedup: DedupConfig | None = None,
         download: DownloadConfig | None = None,
+        storage: StorageConfig | None = None,
         daft: DaftConfig | None = None,
         dry_run: bool = False,
         world_size: int = 1,
@@ -48,6 +50,8 @@ def make_ctx(tmp_path):
             kwargs["dedup"] = dedup
         if download is not None:
             kwargs["download"] = download
+        if storage is not None:
+            kwargs["storage"] = storage
         if daft is not None:
             kwargs["daft"] = daft
         cfg = Config(
@@ -135,6 +139,10 @@ def build_synthetic_artifacts(ctx, n_per_cluster=20, dim=8, generators=("gen_a",
                     "phash": bytes(18),
                     "colorhash": bytes(6),
                     "laplacian": 10.0,
+                    "shard": "",
+                    "member": "",
+                    "offset": 0,
+                    "size": 1000 + index,
                 }
             )
             ids.append(iid)

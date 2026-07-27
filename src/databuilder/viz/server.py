@@ -11,6 +11,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from ..wds import ImageRef, image_media_type, resolve_logical_path
+
 log = logging.getLogger("databuilder.viz")
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -198,15 +200,30 @@ def create_app(
             for c, n in zip(unique, counts)
         ]
 
-    def resolve_rel(rel: str) -> Path:
+    locator_cache: dict[str, dict] = {}
+
+    def locator_of(rel: str) -> dict:
         name, _, rest = rel.partition("/")
-        if name in roots:
-            return Path(roots[name]) / rest
-        if data_dir is not None:
-            return Path(data_dir) / rel
-        raise HTTPException(
-            503, "dataset roots unknown; pass --data-dir to `databuilder viz`"
-        )
+        if rel in locator_cache:
+            return locator_cache[rel]
+        effective_roots = dict(roots)
+        if name not in effective_roots and data_dir is not None:
+            effective_roots[name] = str(Path(data_dir) / name)
+        if name not in effective_roots:
+            raise HTTPException(
+                503, "dataset roots unknown; pass --data-dir to `databuilder viz`"
+            )
+        try:
+            row = resolve_logical_path(effective_roots, rel)
+        except (KeyError, FileNotFoundError, OSError) as exc:
+            raise HTTPException(404, f"image missing: {exc}") from exc
+        row["_roots"] = effective_roots
+        locator_cache[rel] = row
+        return row
+
+    def display_rel(rel: str) -> str:
+        row = locator_of(rel)
+        return ImageRef.from_row(row).display(row["_roots"])
 
     pairs = _PairsIndex(work_dir / "viz" / "pairs.parquet")
 
@@ -245,7 +262,7 @@ def create_app(
         rel = rel_of(image_id)
         if rel is None:
             raise HTTPException(404, "unknown image id")
-        return {"path": rel, "abs_path": str(resolve_rel(rel))}
+        return {"path": rel, "abs_path": display_rel(rel)}
 
     @app.post("/api/flag/{image_id}")
     def set_flag(image_id: int, flagged: bool = Body(embed=True)) -> dict:
@@ -265,7 +282,7 @@ def create_app(
                 {
                     "id": str(image_id),
                     "path": rel,
-                    "abs_path": str(resolve_rel(rel)),
+                    "abs_path": display_rel(rel),
                 }
             )
         return out
@@ -276,7 +293,7 @@ def create_app(
         for image_id in sorted(flags.ids):
             rel = rel_of(image_id)
             if rel is not None:
-                lines.append(str(resolve_rel(rel)))
+                lines.append(display_rel(rel))
         return PlainTextResponse(
             "\n".join(lines) + ("\n" if lines else ""),
             headers={"Content-Disposition": "attachment; filename=flags.txt"},
@@ -350,9 +367,10 @@ def create_app(
             raise HTTPException(404, "unknown image id")
         cached = cache.get(image_id)
         if cached is None:
-            abs_path = resolve_rel(rel)
             try:
-                with Image.open(abs_path) as img:
+                row = locator_of(rel)
+                data = ImageRef.from_row(row).read_bytes(row["_roots"])
+                with Image.open(io.BytesIO(data)) as img:
                     img = img.convert("RGB")
                     img.thumbnail((THUMB_SIZE, THUMB_SIZE))
                     buffer = io.BytesIO()
@@ -364,14 +382,16 @@ def create_app(
         return Response(cached, media_type="image/jpeg")
 
     @app.get("/image/{image_id}")
-    def full_image(image_id: int) -> FileResponse:
+    def full_image(image_id: int) -> Response:
         rel = rel_of(image_id)
         if rel is None:
             raise HTTPException(404, "unknown image id")
-        abs_path = resolve_rel(rel)
-        if not abs_path.is_file():
-            raise HTTPException(404, "image file missing")
-        return FileResponse(abs_path)
+        row = locator_of(rel)
+        try:
+            data = ImageRef.from_row(row).read_bytes(row["_roots"])
+        except OSError as exc:
+            raise HTTPException(404, f"image missing: {exc}") from exc
+        return Response(data, media_type=image_media_type(row))
 
     return app
 

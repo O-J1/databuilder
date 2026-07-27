@@ -1,21 +1,21 @@
 from __future__ import annotations
 
+import io
 import logging
-import os
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import pyarrow as pa
 
 from ..state import RunContext
-from ..utils import ParquetShardWriter, image_id, normalize_relpath, owns
+from ..utils import ParquetShardWriter, image_id, owns
+from ..wds import ImageRef, LOCATOR_FIELDS
 from .common import (
-    dataset_root,
-    iter_dataset_images,
-    load_layout,
+    archived_row,
+    dataset_roots,
+    iter_dataset_records,
     protected_datasets,
     pipeline_datasets,
-    resolve_meta,
     uses_folder_labels,
 )
 
@@ -31,6 +31,7 @@ KEPT_SCHEMA = pa.schema(
         ("width", pa.int32()),
         ("height", pa.int32()),
         ("filesize", pa.int64()),
+        *LOCATOR_FIELDS,
     ]
 )
 REMOVED_SCHEMA = pa.schema(
@@ -60,14 +61,20 @@ def _init_worker() -> None:
         pass
 
 
-def _inspect(abs_path: str) -> tuple[int, int, int, str]:
+def _inspect(item: tuple[dict, dict[str, str]]) -> tuple[int, int, int, str]:
     """Header-only probe. Returns (width, height, filesize, error)."""
     from PIL import Image
 
+    row, roots = item
     try:
-        with Image.open(abs_path) as img:
+        ref = ImageRef.from_row(row)
+        if ref.shard:
+            source = io.BytesIO(ref.read_bytes(roots))
+        else:
+            source = Path(roots[ref.dataset]) / ref.path.partition("/")[2]
+        with Image.open(source) as img:
             width, height = img.size
-        return width, height, os.path.getsize(abs_path), ""
+        return width, height, ref.size, ""
     except Exception as exc:  # noqa: BLE001 - any failure means unopenable
         return 0, 0, 0, type(exc).__name__ or "broken"
 
@@ -76,7 +83,7 @@ def run(ctx: RunContext) -> None:
     filters = ctx.cfg.filters
     tall, wide = filters.tall_ratio, filters.wide_ratio
     datasets = pipeline_datasets(ctx.cfg)
-    layouts = {ds.name: load_layout(ctx.cfg, ds) for ds in datasets}
+    roots = dataset_roots(ctx.cfg)
     protected = protected_datasets(ctx.cfg)
     if protected:
         log.info("in-place source datasets protected from deletion: %s", sorted(protected))
@@ -86,13 +93,13 @@ def run(ctx: RunContext) -> None:
     stats = {"kept": 0, "broken": 0, "too_small": 0, "too_tall": 0, "too_wide": 0}
 
     with kept, removed, ProcessPoolExecutor(ctx.workers, initializer=_init_worker) as pool:
-        batch: list[tuple[str, Path, str]] = []
+        batch: list[dict] = []
 
         def flush() -> None:
-            results = pool.map(_inspect, [str(p) for _, p, _ in batch], chunksize=32)
-            for (rel, abs_path, ds_name), (width, height, filesize, error) in zip(
-                batch, results
-            ):
+            results = pool.map(_inspect, [(row, roots) for row in batch], chunksize=32)
+            for row, (width, height, filesize, error) in zip(batch, results):
+                rel = row["path"]
+                ds_name = row["dataset"]
                 reason = ""
                 if error:
                     reason = "broken_header"
@@ -107,12 +114,11 @@ def run(ctx: RunContext) -> None:
                 if reason:
                     stats[reason if reason != "broken_header" else "broken"] += 1
                     removed.append({"path": rel, "dataset": ds_name, "reason": reason})
-                    if ds_name not in protected:
-                        ctx.remove_file(abs_path)
+                    if not archived_row(row) and ds_name not in protected:
+                        ctx.remove_file(Path(roots[ds_name]) / rel.partition("/")[2])
                     continue
                 ds = next(d for d in datasets if d.name == ds_name)
-                rel_parts = Path(rel).parts[1:]  # strip dataset dir
-                label, generator = resolve_meta(ds, rel_parts, layouts[ds_name])
+                label, generator = row["label"], row["generator"]
                 if label == "unknown" and uses_folder_labels(ds):
                     raise RuntimeError(
                         f"dataset {ds.name!r}: cannot infer a label from path {rel!r}. "
@@ -129,18 +135,20 @@ def run(ctx: RunContext) -> None:
                         "width": width,
                         "height": height,
                         "filesize": filesize,
+                        "shard": row.get("shard") or "",
+                        "member": row.get("member") or "",
+                        "offset": int(row.get("offset") or 0),
+                        "size": int(row.get("size") or filesize),
                     }
                 )
                 stats["kept"] += 1
             batch.clear()
 
         for ds in datasets:
-            root = dataset_root(ctx.cfg, ds)
-            for abs_path in iter_dataset_images(root, ds):
-                rel = f"{ds.name}/{normalize_relpath(abs_path.relative_to(root))}"
-                if not owns(rel, ctx.rank, ctx.world_size):
+            for row in iter_dataset_records(ctx.cfg, ds):
+                if not owns(row["path"], ctx.rank, ctx.world_size):
                     continue
-                batch.append((rel, abs_path, ds.name))
+                batch.append(row)
                 if len(batch) >= BATCH:
                     flush()
         flush()

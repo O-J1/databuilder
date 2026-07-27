@@ -5,7 +5,6 @@ import io
 import json
 import logging
 import os
-import shutil
 import tarfile
 import zipfile
 from dataclasses import dataclass
@@ -16,8 +15,25 @@ import pyarrow.parquet as pq
 
 from ..config import ConfigError, DatasetConfig, ImageColumnConfig
 from ..state import RunContext
-from ..utils import IMAGE_SUFFIXES, safe_name, sniff_extension
-from .common import MATERIALIZED_MARKER, iter_dataset_images
+from ..utils import IMAGE_SUFFIXES, normalize_relpath, safe_name, sniff_extension
+from ..wds import (
+    DatasetShardWriter,
+    archive_raw_snapshot,
+    atomic_json,
+    copy_stream,
+    is_webdataset,
+    load_marker,
+    remove_empty_directories,
+    remove_tree_contents,
+)
+from .common import (
+    MATERIALIZED_MARKER,
+    config_layout,
+    iter_dataset_images,
+    label_from_value,
+    load_layout,
+    resolve_meta,
+)
 
 log = logging.getLogger("databuilder.download")
 
@@ -57,72 +73,293 @@ def run(ctx: RunContext) -> None:
     if ctx.rank != 0:
         raise RuntimeError("download.run must only be invoked on rank 0")
     for ds in sorted(ctx.cfg.datasets, key=lambda item: item.name):
-        if ds.in_place:
-            count = sum(1 for _ in iter_dataset_images(Path(ds.path), ds))
-            if count == 0:
-                raise ConfigError(f"dataset {ds.name!r}: no images found under {ds.path}")
-            log.info("dataset %r: %d images in place at %s", ds.name, count, ds.path)
-            continue
         target = ctx.data_dir / ds.name
-        done_marker = target / MATERIALIZED_MARKER
-        if done_marker.exists():
+        marker = load_marker(target)
+        if is_webdataset(target) or marker.get("storage") == "raw_tar":
             log.info("dataset %r already prepared, skipping", ds.name)
+            continue
+        if marker.get("storage") == "webdataset" and marker.get("state") == "compacting":
+            raise RuntimeError(
+                f"dataset {ds.name!r} has interrupted shard compaction; run "
+                "`databuilder storage compact --config <config>` before the pipeline"
+            )
+        loose_root = target if target.is_dir() else None
+        has_loose = loose_root is not None and next(iter_dataset_images(loose_root, ds), None)
+        # A v1 marker means the old loose materialization completed. Pack it
+        # without consulting Hugging Face, then remove any redundant snapshot.
+        if has_loose and marker and marker.get("storage_version") != 2:
+            if ctx.dry_run:
+                log.info("dry-run: would migrate completed loose dataset %r", ds.name)
+                continue
+            stats = migrate_loose_dataset(ctx, ds, target)
+            _cleanup_remote_state(ctx, ds)
+            log.info("dataset %r migrated to WebDataset: %s", ds.name, stats)
             continue
         if ctx.dry_run:
             log.info("dry-run: would snapshot/materialize %r (%s)", ds.name, ds.repo_id or ds.path)
             continue
-        stats = _materialize(ctx, ds, target)
-        done_marker.parent.mkdir(parents=True, exist_ok=True)
-        done_marker.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+        source_dir, cleanup_source = _source_directory(ctx, ds, allow_download=True)
+        if ds.download_only:
+            stats = archive_raw_snapshot(source_dir, target, ds.name)
+            atomic_json(target / MATERIALIZED_MARKER, stats)
+        else:
+            stats = _materialize(ctx, ds, source_dir, target)
+        if cleanup_source and not ctx.cfg.download.retain_snapshots:
+            remove_tree_contents(source_dir)
+        if not ctx.cfg.download.retain_xet_cache:
+            remove_tree_contents(_staging_root(ctx) / ".hf_xet")
         log.info("dataset %r prepared: %s", ds.name, stats)
 
 
-def _materialize(ctx: RunContext, ds: DatasetConfig, target: Path) -> dict:
-    if ds.is_local:
-        source_dir = Path(ds.path)
-    else:
-        # Set the Xet cache before importing huggingface_hub so its constants
-        # cannot resolve to a user-home cache outside the configured data tree.
-        os.environ["HF_XET_CACHE"] = str(ctx.data_dir / ".hf_xet")
-        if ctx.cfg.download.xet_high_performance:
-            os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"
-        from huggingface_hub import snapshot_download
+def _staging_root(ctx: RunContext) -> Path:
+    return ctx.cfg.download.staging_dir or (ctx.data_dir / ".databuilder-staging")
 
-        # Keep every network write beneath data_dir. Xet/HF owns partial state
-        # and resume behavior; databuilder deliberately does not download files
-        # itself or maintain a second resume manifest.
-        local_dir = target if ds.download_only else ctx.data_dir / ".hf_snapshots" / ds.name
-        source_dir = Path(
-            snapshot_download(
-                repo_id=ds.repo_id,
-                repo_type="dataset",
-                revision=ds.revision or None,
-                local_dir=local_dir,
-                allow_patterns=list(ds.allow_patterns) or None,
-                max_workers=ctx.cfg.download.max_workers,
-            )
+
+def _snapshot_candidates(ctx: RunContext, ds: DatasetConfig) -> tuple[Path, ...]:
+    return (
+        ctx.data_dir / ".hf_snapshots" / ds.name,
+        _staging_root(ctx) / ".hf_snapshots" / ds.name,
+    )
+
+
+def _directory_has_files(path: Path) -> bool:
+    return path.is_dir() and any(item.is_file() for item in path.rglob("*"))
+
+
+def _source_directory(
+    ctx: RunContext, ds: DatasetConfig, *, allow_download: bool
+) -> tuple[Path, bool]:
+    if ds.is_local:
+        return Path(ds.path), False
+    for candidate in _snapshot_candidates(ctx, ds):
+        if _directory_has_files(candidate):
+            log.info("dataset %r: using existing snapshot %s", ds.name, candidate)
+            return candidate, True
+    if not allow_download:
+        raise FileNotFoundError(f"dataset {ds.name!r}: no local snapshot exists")
+
+    staging = _staging_root(ctx)
+    local_dir = staging / ".hf_snapshots" / ds.name
+    xet_cache = staging / ".hf_xet"
+    local_dir.mkdir(parents=True, exist_ok=True)
+    xet_cache.mkdir(parents=True, exist_ok=True)
+    # Only relocate Xet's cache. All transfer tuning, including high-performance
+    # mode, remains at huggingface_hub/user environment defaults.
+    os.environ["HF_XET_CACHE"] = str(xet_cache)
+    from huggingface_hub import snapshot_download
+
+    source_dir = Path(
+        snapshot_download(
+            repo_id=ds.repo_id,
+            repo_type="dataset",
+            revision=ds.revision or None,
+            local_dir=local_dir,
+            allow_patterns=list(ds.allow_patterns) or None,
+            max_workers=ctx.cfg.download.max_workers,
         )
-    if ds.download_only:
-        return {"format": "raw", "snapshot": str(source_dir), "download_only": True}
+    )
+    return source_dir, True
+
+
+def _new_writer(ctx: RunContext, ds: DatasetConfig, target: Path) -> DatasetShardWriter:
+    return DatasetShardWriter(
+        target,
+        ds.name,
+        target_shard_bytes=ctx.cfg.storage.target_shard_bytes,
+        max_samples_per_shard=ctx.cfg.storage.max_samples_per_shard,
+    )
+
+
+def _materialize(
+    ctx: RunContext, ds: DatasetConfig, source_dir: Path, target: Path
+) -> dict:
+    writer = _new_writer(ctx, ds, target)
+    # Recover any loose files written by an interrupted pre-WDS materializer.
+    _pack_loose_into(ctx, ds, target, writer)
 
     fmt = ds.format if ds.format != "auto" else _detect_format(source_dir)
     log.info("dataset %r: format=%s source=%s", ds.name, fmt, source_dir)
     target.mkdir(parents=True, exist_ok=True)
-    if fmt == "parquet":
-        return _materialize_parquet(ctx, ds, source_dir, target)
-    if fmt == "arrow":
-        return _materialize_arrow(ctx, ds, source_dir, target)
-    if fmt == "jsonl":
-        return _materialize_jsonl(ctx, ds, source_dir, target)
-    if fmt == "zip":
-        return _materialize_zip(ds, source_dir, target)
-    if fmt in {"tar", "webdataset", "multipart_tar"}:
-        return _materialize_tar(ds, source_dir, target, fmt)
-    if fmt == "multipart_zip":
-        return _materialize_multipart_zip(ds, source_dir, target)
-    if fmt == "imagefolder":
-        return _materialize_imagefolder(ds, source_dir, target)
-    raise ConfigError(f"dataset {ds.name!r}: unsupported materialization format {fmt!r}")
+    try:
+        if fmt == "parquet":
+            stats = _materialize_parquet(ctx, ds, source_dir, writer)
+        elif fmt == "arrow":
+            stats = _materialize_arrow(ctx, ds, source_dir, writer)
+        elif fmt == "jsonl":
+            stats = _materialize_jsonl(ctx, ds, source_dir, writer)
+        elif fmt == "zip":
+            stats = _materialize_zip(ds, source_dir, writer)
+        elif fmt in {"tar", "webdataset", "multipart_tar"}:
+            stats = _materialize_tar(ds, source_dir, writer, fmt)
+        elif fmt == "multipart_zip":
+            stats = _materialize_multipart_zip(ds, source_dir, writer)
+        elif fmt == "imagefolder":
+            stats = _materialize_imagefolder(ds, source_dir, writer)
+        else:
+            raise ConfigError(
+                f"dataset {ds.name!r}: unsupported materialization format {fmt!r}"
+            )
+        result = writer.finalize(stats)
+        remove_empty_directories(target)
+        return result
+    except Exception:
+        writer.close()
+        raise
+
+
+def _pack_loose_into(
+    ctx: RunContext,
+    ds: DatasetConfig,
+    root: Path,
+    writer: DatasetShardWriter,
+) -> int:
+    """Pack legacy materialized images, deleting each only after shard commit."""
+    if not root.is_dir():
+        return 0
+    layout = load_layout(ctx.cfg, ds)
+    packed = 0
+    for path in iter_dataset_images(root, ds):
+        relative = normalize_relpath(path.relative_to(root))
+        logical = f"{ds.name}/{relative}"
+        label, generator = resolve_meta(ds, tuple(Path(relative).parts), layout)
+        if writer.add(
+            path.read_bytes(),
+            logical,
+            label,
+            generator,
+            metadata={"migrated_from": relative},
+            delete_source=path,
+        ):
+            packed += 1
+    return packed
+
+
+def migrate_loose_dataset(ctx: RunContext, ds: DatasetConfig, target: Path) -> dict:
+    writer = _new_writer(ctx, ds, target)
+    try:
+        packed = _pack_loose_into(ctx, ds, target, writer)
+        result = writer.finalize({"format": "legacy_loose", "migrated": packed})
+        remove_empty_directories(target)
+        return result
+    except Exception:
+        writer.close()
+        raise
+
+
+def _cleanup_remote_state(ctx: RunContext, ds: DatasetConfig) -> None:
+    if ds.is_local:
+        return
+    if not ctx.cfg.download.retain_snapshots:
+        for path in _snapshot_candidates(ctx, ds):
+            remove_tree_contents(path)
+    if not ctx.cfg.download.retain_xet_cache:
+        remove_tree_contents(_staging_root(ctx) / ".hf_xet")
+        remove_tree_contents(ctx.data_dir / ".hf_xet")
+
+
+def inventory(ctx: RunContext) -> list[dict]:
+    """Classify local dataset state without making any network calls."""
+    rows: list[dict] = []
+    for ds in sorted(ctx.cfg.datasets, key=lambda item: item.name):
+        target = ctx.data_dir / ds.name
+        marker = load_marker(target)
+        loose = target.is_dir() and next(iter_dataset_images(target, ds), None) is not None
+        snapshots = [str(path) for path in _snapshot_candidates(ctx, ds) if _directory_has_files(path)]
+        if is_webdataset(target):
+            status = "webdataset_complete"
+        elif marker.get("storage") == "webdataset" and marker.get("state") == "compacting":
+            status = "webdataset_compacting"
+        elif marker.get("storage") == "raw_tar":
+            status = "raw_tar_complete"
+        elif loose and marker:
+            status = "loose_complete"
+        elif loose and snapshots:
+            status = "loose_partial_with_snapshot"
+        elif loose:
+            status = "loose_only"
+        elif snapshots:
+            status = "snapshot_only"
+        elif ds.is_local and _directory_has_files(Path(ds.path)):
+            status = "local_source"
+        elif ds.download_only and target.is_dir() and marker:
+            status = "raw_snapshot_legacy"
+        else:
+            status = "missing"
+        rows.append(
+            {
+                "dataset": ds.name,
+                "status": status,
+                "target": str(target),
+                "snapshots": snapshots,
+            }
+        )
+    return rows
+
+
+def migrate_existing(ctx: RunContext) -> list[dict]:
+    """Convert only local state. This function never calls Hugging Face."""
+    results: list[dict] = []
+    for ds in sorted(ctx.cfg.datasets, key=lambda item: item.name):
+        target = ctx.data_dir / ds.name
+        marker = load_marker(target)
+        if is_webdataset(target) or marker.get("storage") == "raw_tar":
+            results.append({"dataset": ds.name, "status": "already_complete"})
+            continue
+        if marker.get("storage") == "webdataset" and marker.get("state") == "compacting":
+            results.append({"dataset": ds.name, "status": "compaction_in_progress"})
+            continue
+        loose = target.is_dir() and next(iter_dataset_images(target, ds), None) is not None
+        if ds.download_only and target.is_dir() and marker and not loose:
+            stats = archive_raw_snapshot(target, target, ds.name)
+            _remove_legacy_raw_files(target)
+            atomic_json(target / MATERIALIZED_MARKER, stats)
+            _cleanup_remote_state(ctx, ds)
+            results.append({"dataset": ds.name, "status": "migrated", **stats})
+            continue
+        try:
+            source, cleanup_source = _source_directory(ctx, ds, allow_download=False)
+        except FileNotFoundError:
+            source = None
+            cleanup_source = False
+        if loose and marker and source is None:
+            stats = migrate_loose_dataset(ctx, ds, target)
+        elif source is not None:
+            if ds.download_only:
+                stats = archive_raw_snapshot(source, target, ds.name)
+                atomic_json(target / MATERIALIZED_MARKER, stats)
+            else:
+                stats = _materialize(ctx, ds, source, target)
+            if cleanup_source and not ctx.cfg.download.retain_snapshots:
+                remove_tree_contents(source)
+        elif loose:
+            # Preserve every locally available image. The marker records that
+            # this was a loose-only recovery so inventory remains explicit.
+            stats = migrate_loose_dataset(ctx, ds, target)
+            stats["recovered_from"] = "loose_only"
+            atomic_json(target / MATERIALIZED_MARKER, stats)
+        else:
+            results.append({"dataset": ds.name, "status": "needs_download"})
+            continue
+        _cleanup_remote_state(ctx, ds)
+        results.append({"dataset": ds.name, "status": "migrated", **stats})
+    return results
+
+
+def _remove_legacy_raw_files(target: Path) -> None:
+    """Remove old raw snapshot files but retain the committed raw tar."""
+    target = target.resolve()
+    raw = (target / "raw").resolve()
+    for path in sorted(target.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        resolved = path.resolve()
+        if resolved == raw or resolved.is_relative_to(raw) or path.name == MATERIALIZED_MARKER:
+            continue
+        if path.is_file() or path.is_symlink():
+            path.unlink(missing_ok=True)
+        elif path.is_dir():
+            try:
+                path.rmdir()
+            except OSError:
+                pass
 
 
 def _detect_format(snapshot_dir: Path) -> str:
@@ -278,16 +515,17 @@ class _RowMaterializer:
         self,
         ctx: RunContext,
         ds: DatasetConfig,
-        target: Path,
+        writer: DatasetShardWriter,
         source_dir: Path,
         mapping: TableMap,
     ) -> None:
         self.ctx = ctx
         self.ds = ds
-        self.target = target
+        self.writer = writer
         self.source_dir = source_dir
         self.mapping = mapping
         self.written = 0
+        self.added = 0
         self.skipped = 0
         self.filtered = 0
 
@@ -323,9 +561,11 @@ class _RowMaterializer:
             if data is None:
                 self.skipped += 1
                 continue
-            out_dir = self.target
+            parts: list[str] = []
+            raw_label = None
             if self.mapping.label:
-                out_dir /= safe_name(row.get(self.mapping.label)).lower()
+                raw_label = row.get(self.mapping.label)
+                parts.append(safe_name(raw_label).lower())
             generator = None
             if spec.generator:
                 generator = spec.generator
@@ -337,20 +577,43 @@ class _RowMaterializer:
                 # Dynamic generator columns are legitimately null for real rows.
                 # Keep that provenance explicit instead of turning the legacy
                 # `column:<name>` config syntax into a literal directory name.
-                out_dir /= safe_name(generator)
-            out_dir.mkdir(parents=True, exist_ok=True)
+                parts.append(safe_name(generator))
             suffix = f"_i{image_idx}" if len(self.mapping.images) > 1 else ""
             name = (
                 f"{self.ds.name}_{file_idx:05d}_{self.written:09d}{suffix}"
                 f"{sniff_extension(data)}"
             )
-            (out_dir / name).write_bytes(data)
+            relative = normalize_relpath(Path(*parts, name))
+            logical = f"{self.ds.name}/{relative}"
+            if raw_label is not None:
+                label = label_from_value(self.ds, str(raw_label)) or str(raw_label).lower()
+            else:
+                label = self.ds.label if self.ds.label in {"real", "fake"} else "unknown"
+            final_generator = (
+                safe_name(generator)
+                if self.layout["generator_dir"]
+                else (self.ds.generator or self.ds.name)
+            )
+            source_split = str(row.get(self.mapping.split) or "") if self.mapping.split else ""
+            source_meta = {
+                "source_file": normalize_relpath(source_path.relative_to(self.source_dir)),
+                "image_column": spec.column,
+            }
+            if self.writer.add(
+                data,
+                logical,
+                label,
+                final_generator,
+                source_split=source_split,
+                metadata=source_meta,
+            ):
+                self.added += 1
             self.written += 1
 
     def stats(self, fmt: str) -> dict:
         return {
             "format": fmt,
-            "written": self.written,
+            "written_from_source": self.added,
             "skipped": self.skipped,
             "filtered": self.filtered,
             "layout": self.layout,
@@ -367,7 +630,7 @@ def _selected_columns(ds: DatasetConfig, mapping: TableMap) -> list[str]:
 
 
 def _materialize_parquet(
-    ctx: RunContext, ds: DatasetConfig, source_dir: Path, target: Path
+    ctx: RunContext, ds: DatasetConfig, source_dir: Path, shard_writer: DatasetShardWriter
 ) -> dict:
     files = sorted(source_dir.rglob("*.parquet"))
     if not files:
@@ -376,7 +639,7 @@ def _materialize_parquet(
         matched = [path for path in files if ds.source_split in path.name]
         files = matched or files
     mapping = _resolve_table(ds, pq.ParquetFile(files[0]).schema_arrow)
-    writer = _RowMaterializer(ctx, ds, target, source_dir, mapping)
+    writer = _RowMaterializer(ctx, ds, shard_writer, source_dir, mapping)
     columns = _selected_columns(ds, mapping)
     log.info("dataset %r: resolved table columns %s", ds.name, mapping)
     for file_idx, parquet_path in enumerate(files):
@@ -387,7 +650,6 @@ def _materialize_parquet(
         for batch in reader.iter_batches(batch_size=256, columns=columns):
             for row in batch.to_pylist():
                 writer.add(row, file_idx, parquet_path)
-        _discard_source(ds, parquet_path)
     return writer.stats("parquet")
 
 
@@ -401,7 +663,7 @@ def _open_arrow(path: Path):
 
 
 def _materialize_arrow(
-    ctx: RunContext, ds: DatasetConfig, source_dir: Path, target: Path
+    ctx: RunContext, ds: DatasetConfig, source_dir: Path, shard_writer: DatasetShardWriter
 ) -> dict:
     files = sorted(source_dir.rglob("*.arrow"))
     if not files:
@@ -412,7 +674,7 @@ def _materialize_arrow(
     finally:
         first_source.close()
     columns = _selected_columns(ds, mapping)
-    writer = _RowMaterializer(ctx, ds, target, source_dir, mapping)
+    writer = _RowMaterializer(ctx, ds, shard_writer, source_dir, mapping)
     for file_idx, arrow_path in enumerate(files):
         source, reader = _open_arrow(arrow_path)
         try:
@@ -427,12 +689,11 @@ def _materialize_arrow(
                     writer.add(row, file_idx, arrow_path)
         finally:
             source.close()
-        _discard_source(ds, arrow_path)
     return writer.stats("arrow")
 
 
 def _materialize_jsonl(
-    ctx: RunContext, ds: DatasetConfig, source_dir: Path, target: Path
+    ctx: RunContext, ds: DatasetConfig, source_dir: Path, shard_writer: DatasetShardWriter
 ) -> dict:
     files = sorted(source_dir.rglob("*.jsonl"))
     if not files:
@@ -443,7 +704,7 @@ def _materialize_jsonl(
     fields = set(_selected_columns(ds, TableMap(ds.images, ds.label_column, ds.generator_column, None)))
     schema = pa.schema((name, pa.string()) for name in sorted(fields))
     mapping = _resolve_table(ds, schema)
-    writer = _RowMaterializer(ctx, ds, target, source_dir, mapping)
+    writer = _RowMaterializer(ctx, ds, shard_writer, source_dir, mapping)
     for file_idx, jsonl_path in enumerate(files):
         with jsonl_path.open("r", encoding="utf-8") as handle:
             for line_no, line in enumerate(handle, 1):
@@ -456,7 +717,6 @@ def _materialize_jsonl(
                         f"dataset {ds.name!r}: invalid JSON at {jsonl_path}:{line_no}"
                     ) from exc
                 writer.add(row, file_idx, jsonl_path)
-        _discard_source(ds, jsonl_path)
     return writer.stats("jsonl")
 
 
@@ -484,32 +744,48 @@ def _encoded_bytes(
     return None
 
 
-def _safe_destination(base: Path, member_name: str) -> Path | None:
-    destination = (base / member_name.replace("\\", "/")).resolve()
-    return destination if destination.is_relative_to(base.resolve()) else None
+def _safe_member_name(member_name: str) -> str | None:
+    normalized = member_name.replace("\\", "/").lstrip("/")
+    parts = Path(normalized).parts
+    if not normalized or any(part in {"", ".", ".."} for part in parts):
+        return None
+    return normalize_relpath(Path(*parts))
 
 
-def _materialize_zip(ds: DatasetConfig, source_dir: Path, target: Path) -> dict:
-    extracted = 0
+def _archive_meta(ds: DatasetConfig, relative: str) -> tuple[str, str]:
+    return resolve_meta(ds, tuple(Path(relative).parts), config_layout(ds))
+
+
+def _materialize_zip(
+    ds: DatasetConfig, source_dir: Path, writer: DatasetShardWriter
+) -> dict:
+    written = 0
     archives = sorted(source_dir.rglob("*.zip"))
     if not archives:
         raise ConfigError(f"dataset {ds.name!r}: no zip files under {source_dir}")
     for zip_path in archives:
-        out_dir = target / safe_name(zip_path.stem)
+        prefix = safe_name(zip_path.stem)
         with zipfile.ZipFile(zip_path) as archive:
             for member in archive.infolist():
                 if member.is_dir() or Path(member.filename).suffix.lower() not in IMAGE_SUFFIXES:
                     continue
-                dest = _safe_destination(out_dir, member.filename)
-                if dest is None:
+                safe_member = _safe_member_name(member.filename)
+                if safe_member is None:
                     log.warning("skipping unsafe zip entry %r", member.filename)
                     continue
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(member) as src, dest.open("wb") as dst:
-                    shutil.copyfileobj(src, dst)
-                extracted += 1
-        _discard_source(ds, zip_path)
-    return {"format": "zip", "written": extracted}
+                relative = normalize_relpath(Path(prefix) / safe_member)
+                label, generator = _archive_meta(ds, relative)
+                with archive.open(member) as src:
+                    data = copy_stream(src)
+                if writer.add(
+                    data,
+                    f"{ds.name}/{relative}",
+                    label,
+                    generator,
+                    metadata={"source_archive": zip_path.name, "source_member": member.filename},
+                ):
+                    written += 1
+    return {"format": "zip", "written_from_source": written}
 
 
 def _tar_files(source_dir: Path) -> list[Path]:
@@ -522,9 +798,9 @@ def _tar_files(source_dir: Path) -> list[Path]:
 
 
 def _materialize_tar(
-    ds: DatasetConfig, source_dir: Path, target: Path, fmt: str
+    ds: DatasetConfig, source_dir: Path, writer: DatasetShardWriter, fmt: str
 ) -> dict:
-    extracted = 0
+    written = 0
     archives = _tar_files(source_dir)
     if not archives:
         raise ConfigError(f"dataset {ds.name!r}: no tar files under {source_dir}")
@@ -533,13 +809,13 @@ def _materialize_tar(
         # Some repositories use `split` to cut one tar byte stream into numbered
         # .tar chunks. Present those chunks as one seekable file without writing
         # a second, enormous combined archive to disk.
-        out_dir = target / safe_name(
+        prefix = safe_name(
             archives[0].name.removesuffix(".tar.gz").removesuffix(".tgz").removesuffix(".tar")
         )
         joined = _MultipartFile(archives)
         try:
             with tarfile.open(fileobj=joined, mode="r:*") as archive:
-                extracted += _extract_tar_images(archive, out_dir)
+                written += _copy_tar_images(ds, archive, writer, prefix, "multipart_tar")
         except tarfile.ReadError as exc:
             raise ConfigError(
                 f"dataset {ds.name!r}: concatenated tar stream is unreadable across "
@@ -547,41 +823,51 @@ def _materialize_tar(
             ) from exc
         finally:
             joined.close()
-        for tar_path in archives:
-            _discard_source(ds, tar_path)
-        return {"format": fmt, "written": extracted, "parts": len(archives)}
+        return {"format": fmt, "written_from_source": written, "parts": len(archives)}
 
     for tar_path in archives:
         stem = tar_path.name.removesuffix(".tar.gz").removesuffix(".tgz").removesuffix(".tar")
-        out_dir = target / safe_name(stem)
         try:
             with tarfile.open(tar_path, "r:*") as archive:
-                extracted += _extract_tar_images(archive, out_dir)
+                written += _copy_tar_images(ds, archive, writer, safe_name(stem), tar_path.name)
         except tarfile.ReadError as exc:
             raise ConfigError(
                 f"dataset {ds.name!r}: tar archive {tar_path} is unreadable. "
                 "If these are numbered chunks of one tar stream, set "
                 "format = 'multipart_tar'."
             ) from exc
-        _discard_source(ds, tar_path)
-    return {"format": fmt, "written": extracted}
+    return {"format": fmt, "written_from_source": written}
 
 
-def _extract_tar_images(archive: tarfile.TarFile, out_dir: Path) -> int:
-    extracted = 0
+def _copy_tar_images(
+    ds: DatasetConfig,
+    archive: tarfile.TarFile,
+    writer: DatasetShardWriter,
+    prefix: str,
+    source_archive: str,
+) -> int:
+    written = 0
     for member in archive:
         if not member.isfile() or Path(member.name).suffix.lower() not in IMAGE_SUFFIXES:
             continue
-        dest = _safe_destination(out_dir, member.name)
+        safe_member = _safe_member_name(member.name)
         src = archive.extractfile(member)
-        if dest is None or src is None:
+        if safe_member is None or src is None:
             log.warning("skipping unsafe/unreadable tar entry %r", member.name)
             continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        with src, dest.open("wb") as dst:
-            shutil.copyfileobj(src, dst)
-        extracted += 1
-    return extracted
+        relative = normalize_relpath(Path(prefix) / safe_member)
+        label, generator = _archive_meta(ds, relative)
+        with src:
+            data = copy_stream(src)
+        if writer.add(
+            data,
+            f"{ds.name}/{relative}",
+            label,
+            generator,
+            metadata={"source_archive": source_archive, "source_member": member.name},
+        ):
+            written += 1
+    return written
 
 
 class _MultipartFile(io.RawIOBase):
@@ -661,7 +947,7 @@ def _metadata_members(path: Path, output_column: str) -> set[str]:
 
 
 def _materialize_multipart_zip(
-    ds: DatasetConfig, source_dir: Path, target: Path
+    ds: DatasetConfig, source_dir: Path, writer: DatasetShardWriter
 ) -> dict:
     parts = sorted(source_dir.glob(ds.multipart_glob))
     metadata = source_dir / ds.metadata_file
@@ -687,24 +973,29 @@ def _materialize_multipart_zip(
                     continue
                 if Path(name).suffix.lower() not in IMAGE_SUFFIXES:
                     continue
-                dest = _safe_destination(target, name)
-                if dest is None:
+                safe_member = _safe_member_name(name)
+                if safe_member is None:
                     log.warning("skipping unsafe multipart entry %r", name)
                     continue
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(info) as src, dest.open("wb") as dst:
-                    shutil.copyfileobj(src, dst)
-                written += 1
+                label, generator = _archive_meta(ds, safe_member)
+                with archive.open(info) as src:
+                    data = copy_stream(src)
+                if writer.add(
+                    data,
+                    f"{ds.name}/{safe_member}",
+                    label,
+                    generator,
+                    metadata={"source_member": name},
+                ):
+                    written += 1
     finally:
         joined.close()
-    if not ds.keep_archives and not ds.is_local:
-        for part in parts:
-            part.unlink(missing_ok=True)
-        metadata.unlink(missing_ok=True)
-    return {"format": "multipart_zip", "written": written, "missing": missing}
+    return {"format": "multipart_zip", "written_from_source": written, "missing": missing}
 
 
-def _materialize_imagefolder(ds: DatasetConfig, source_dir: Path, target: Path) -> dict:
+def _materialize_imagefolder(
+    ds: DatasetConfig, source_dir: Path, writer: DatasetShardWriter
+) -> dict:
     source = source_dir / ds.image_dir if ds.image_dir else source_dir
     if not source.exists():
         raise RuntimeError(f"image_dir {source} does not exist for dataset {ds.name!r}")
@@ -712,21 +1003,21 @@ def _materialize_imagefolder(ds: DatasetConfig, source_dir: Path, target: Path) 
     for path in sorted(source.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
             continue
-        dest = target / path.relative_to(source)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if ds.is_local:
-            shutil.copy2(path, dest)
-        else:
-            shutil.move(str(path), str(dest))
-        moved += 1
+        relative = normalize_relpath(path.relative_to(source))
+        label, generator = _archive_meta(ds, relative)
+        delete_source = path if (not ds.is_local or ds.allow_delete) else None
+        if writer.add(
+            path.read_bytes(),
+            f"{ds.name}/{relative}",
+            label,
+            generator,
+            metadata={"source_path": relative},
+            delete_source=delete_source,
+        ):
+            moved += 1
     if moved == 0:
         raise RuntimeError(
             f"No images found for dataset {ds.name!r} under {source}. "
             "Specify image_dir in the config."
         )
-    return {"format": "imagefolder", "written": moved}
-
-
-def _discard_source(ds: DatasetConfig, path: Path) -> None:
-    if not ds.keep_archives and not ds.is_local:
-        path.unlink(missing_ok=True)
+    return {"format": "imagefolder", "written_from_source": moved}

@@ -44,7 +44,12 @@ def test_minimal_config_defaults(tmp_path):
     assert cfg.daft.runner == "native"
     assert cfg.embedding.concurrency == 0
     assert cfg.download.max_workers == 1
-    assert cfg.download.xet_high_performance is False
+    assert cfg.download.staging_dir is None
+    assert cfg.download.retain_snapshots is False
+    assert cfg.download.retain_xet_cache is False
+    assert cfg.storage.backend == "webdataset"
+    assert cfg.storage.target_shard_bytes == 3_000_000_000
+    assert cfg.storage.max_samples_per_shard == 100_000
     assert cfg.datasets[0].name == "ds1"
     assert CSV_MAX_ROWS == 1_000_000
 
@@ -83,6 +88,12 @@ def test_bad_rank_rejected(tmp_path):
 def test_unknown_key_rejected(tmp_path):
     text = MINIMAL + "\n[filters]\nmin_longest = 5\n"
     with pytest.raises(ConfigError, match="Unknown key"):
+        load_config(_write(tmp_path, text))
+
+
+def test_removed_xet_tuning_key_is_rejected(tmp_path):
+    text = MINIMAL + "\n[download]\nxet_high_performance = true\n"
+    with pytest.raises(ConfigError, match="xet_high_performance"):
         load_config(_write(tmp_path, text))
 
 
@@ -222,7 +233,11 @@ def test_aigc_production_config_is_pinned_and_snapshot_only():
     cfg = load_config(path)
     assert cfg.runtime.data_dir.as_posix() == "/p/data1/datasets/mmlaion/aigc/data"
     assert cfg.download.max_workers == 1
-    assert cfg.download.xet_high_performance is False
+    assert cfg.download.retain_snapshots is False
+    assert cfg.download.retain_xet_cache is False
+    assert cfg.storage.target_shard_bytes == 3_000_000_000
+    assert cfg.storage.max_samples_per_shard == 100_000
+    assert cfg.storage.compact_after_manifest is True
     assert len(cfg.datasets) == 51
     assert len({ds.repo_id for ds in cfg.datasets}) == 40
     assert all(ds.revision for ds in cfg.datasets)
@@ -272,3 +287,5 @@ def test_aigc_production_config_is_pinned_and_snapshot_only():
 
     ideogram = next(ds for ds in cfg.datasets if ds.name == "ideogram-75k")
     assert ideogram.format == "multipart_tar"
+    midjourney = next(ds for ds in cfg.datasets if ds.name == "midjourney-v6-520k-raw")
+    assert midjourney.format == "multipart_tar"

@@ -7,10 +7,9 @@ supports the two pinned URL-backed repositories in examples/aigc-datasets.toml:
 * kafked/anycrap: data/full/train.jsonl -> image_url
 * lehduong/seaart-hq: parquet shards -> url
 
-Images are streamed to ``<data-dir>/<dataset>/url-images``. Completed files
-are resumable by their URL-derived filename; partial ``.part`` files are never
-treated as complete. Every downloaded image is decoded with Pillow before its
-atomic rename into place.
+Images are validated in bounded temporary files and committed directly to
+WebDataset shards. No loose image, Hugging Face snapshot, or Xet cache remains
+after a successful run.
 """
 
 from __future__ import annotations
@@ -33,6 +32,8 @@ from typing import Iterator
 import pyarrow.parquet as pq
 from PIL import Image
 from tqdm import tqdm
+
+from databuilder.wds import DatasetShardWriter, remove_empty_directories, remove_tree_contents
 
 LOG = logging.getLogger("download-url-datasets")
 DEFAULT_DATA_DIR = Path("/p/data1/datasets/mmlaion/aigc/data")
@@ -59,6 +60,8 @@ class DatasetSpec:
     allow_patterns: tuple[str, ...]
     metadata_format: str
     url_column: str
+    label: str = "fake"
+    generator: str = ""
     id_column: str = ""
     required_bool_column: str = ""
 
@@ -71,6 +74,7 @@ DATASETS = {
         allow_patterns=("data/full/train.jsonl",),
         metadata_format="jsonl",
         url_column="image_url",
+        generator="anycrap",
         id_column="id",
         required_bool_column="has_real_image",
     ),
@@ -81,6 +85,7 @@ DATASETS = {
         allow_patterns=("*.parquet", "**/*.parquet"),
         metadata_format="parquet",
         url_column="url",
+        generator="seaart",
     ),
 }
 
@@ -129,6 +134,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_DATA_DIR,
         help=f"dataset root (default: {DEFAULT_DATA_DIR})",
     )
+    parser.add_argument(
+        "--staging-dir",
+        type=Path,
+        default=None,
+        help="ephemeral snapshot/Xet/download staging (default: data-dir/.databuilder-staging)",
+    )
+    parser.add_argument("--target-shard-bytes", type=_positive_int, default=3_000_000_000)
+    parser.add_argument("--max-samples-per-shard", type=_positive_int, default=100_000)
     parser.add_argument(
         "--dataset",
         action="append",
@@ -187,7 +200,9 @@ def parse_headers(values: list[str]) -> dict[str, str]:
     return headers
 
 
-def ensure_metadata_snapshot(data_dir: Path, spec: DatasetSpec, skip: bool) -> Path:
+def ensure_metadata_snapshot(
+    data_dir: Path, spec: DatasetSpec, skip: bool, staging_dir: Path | None = None
+) -> Path:
     root = data_dir / spec.name
     if skip:
         if not root.is_dir():
@@ -196,9 +211,13 @@ def ensure_metadata_snapshot(data_dir: Path, spec: DatasetSpec, skip: bool) -> P
             )
         return root
 
-    # huggingface_hub reads its environment at import time. Keep Xet chunks
-    # below the requested data root, but otherwise retain HF/Xet defaults.
-    os.environ["HF_XET_CACHE"] = str(data_dir / ".hf_xet")
+    staging = staging_dir or (data_dir / ".databuilder-staging")
+    root = staging / ".hf_snapshots" / spec.name
+    xet_cache = staging / ".hf_xet"
+    root.mkdir(parents=True, exist_ok=True)
+    xet_cache.mkdir(parents=True, exist_ok=True)
+    # Only place Xet's ephemeral cache; transfer tuning remains at HF defaults.
+    os.environ["HF_XET_CACHE"] = str(xet_cache)
     from huggingface_hub import snapshot_download
 
     LOG.info("snapshotting metadata for %s at %s", spec.repo_id, spec.revision)
@@ -352,11 +371,10 @@ def download_one(
     overwrite: bool,
     keep_partials: bool,
 ) -> DownloadResult:
+    output_dir.mkdir(parents=True, exist_ok=True)
     existing = _existing_image(output_dir, candidate.stem)
     if existing is not None and not overwrite:
         return DownloadResult(candidate, "skipped", str(existing), existing.stat().st_size)
-
-    output_dir.mkdir(parents=True, exist_ok=True)
     partial = output_dir / f"{candidate.stem}.part"
     last_error = "unknown error"
     attempts = retries + 1
@@ -428,7 +446,9 @@ def download_dataset(
     args: argparse.Namespace,
     headers: dict[str, str],
 ) -> dict[str, int]:
-    output_dir = metadata_root / "url-images"
+    staging = getattr(args, "staging_dir", None) or (args.data_dir / ".databuilder-staging")
+    output_dir = staging / "url-downloads" / spec.name
+    target = args.data_dir / spec.name
     seen: set[str] = set()
     candidates = iter_candidates(spec, metadata_root)
 
@@ -445,15 +465,45 @@ def download_dataset(
         return {"discovered": count, "downloaded": 0, "skipped": 0, "failed": 0}
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = output_dir / "downloads.jsonl"
-    failures_path = output_dir / "failures.jsonl"
+    target.mkdir(parents=True, exist_ok=True)
+    manifest_path = target / "url-downloads.jsonl"
+    failures_path = target / "url-failures.jsonl"
     counters = {"discovered": 0, "downloaded": 0, "skipped": 0, "failed": 0}
     max_pending = max(args.workers * 4, args.workers)
+    writer = DatasetShardWriter(
+        target,
+        spec.name,
+        target_shard_bytes=getattr(args, "target_shard_bytes", 3_000_000_000),
+        max_samples_per_shard=getattr(args, "max_samples_per_shard", 100_000),
+    )
 
     def handle_result(result: DownloadResult, progress: tqdm, manifest, failures) -> None:
+        # A skipped result can be a validated staging file left by an
+        # interrupted conversion. Commit it before treating it as complete.
+        if result.status in {"downloaded", "skipped"} and result.path:
+            temp = Path(result.path)
+            logical = f"{spec.name}/url-images/{result.candidate.stem}.img"
+            data = temp.read_bytes()
+            added = writer.add(
+                data,
+                logical,
+                spec.label,
+                spec.generator or spec.name,
+                metadata={
+                    "url": result.candidate.url,
+                    "row_id": result.candidate.row_id,
+                    "source": result.candidate.source,
+                    "row_number": result.candidate.row_number,
+                },
+                delete_source=temp,
+            )
+            status = "downloaded" if added else "skipped"
+            result = DownloadResult(
+                result.candidate, status, logical, result.bytes_written, result.error
+            )
         counters[result.status] += 1
         if result.status in {"downloaded", "failed"}:
-            record = _json_record(result, metadata_root)
+            record = _json_record(result, args.data_dir)
             handle = failures if result.status == "failed" else manifest
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         progress.update(1)
@@ -470,6 +520,13 @@ def download_dataset(
                 continue
             seen.add(candidate.url)
             counters["discovered"] += 1
+            logical = f"{spec.name}/url-images/{candidate.stem}.img"
+            if writer.contains(logical) and not args.overwrite:
+                counters["skipped"] += 1
+                progress.update(1)
+                if args.limit and counters["discovered"] >= args.limit:
+                    break
+                continue
             pending.add(
                 executor.submit(
                     download_one,
@@ -493,7 +550,27 @@ def download_dataset(
             done, pending = wait(pending, return_when=FIRST_COMPLETED)
             for future in done:
                 handle_result(future.result(), progress, manifest, failures)
+    writer.finalize(
+        {
+            "format": "url",
+            "downloaded": counters["downloaded"],
+            "failed": counters["failed"],
+        }
+    )
+    remove_tree_contents(output_dir)
+    remove_empty_directories(target)
     return counters
+
+
+def _remove_metadata_files(root: Path, spec: DatasetSpec) -> None:
+    """Remove only the snapshotted metadata, never committed WDS artifacts."""
+    root = root.resolve()
+    for pattern in spec.allow_patterns:
+        for path in root.glob(pattern):
+            if path.is_file() and path.resolve().is_relative_to(root):
+                path.unlink(missing_ok=True)
+    remove_tree_contents(root / ".cache" / "huggingface")
+    remove_empty_directories(root)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -507,6 +584,9 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         LOG.error("%s", exc)
         return 2
+    if args.overwrite:
+        LOG.error("--overwrite is incompatible with immutable WebDataset keys")
+        return 2
 
     selected = args.dataset or list(DATASETS)
     overall_failed = 0
@@ -514,7 +594,10 @@ def main(argv: list[str] | None = None) -> int:
         spec = DATASETS[name]
         try:
             metadata_root = ensure_metadata_snapshot(
-                args.data_dir, spec, args.skip_metadata_snapshot
+                args.data_dir,
+                spec,
+                args.skip_metadata_snapshot,
+                args.staging_dir,
             )
             counters = download_dataset(spec, metadata_root, args, headers)
         except (FileNotFoundError, ValueError) as exc:
@@ -523,6 +606,12 @@ def main(argv: list[str] | None = None) -> int:
             continue
         LOG.info("%s complete: %s", name, counters)
         overall_failed += counters["failed"]
+        staging = args.staging_dir or (args.data_dir / ".databuilder-staging")
+        if metadata_root.is_relative_to(staging):
+            remove_tree_contents(metadata_root)
+        else:
+            _remove_metadata_files(metadata_root, spec)
+        remove_tree_contents(staging / ".hf_xet")
     return 1 if overall_failed else 0
 
 

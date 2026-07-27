@@ -5,10 +5,13 @@ import io
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 from PIL import Image
+
+from databuilder.wds import ImageRef, is_webdataset, iter_index
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "download_url_datasets.py"
 SPEC = importlib.util.spec_from_file_location("download_url_datasets", SCRIPT)
@@ -107,3 +110,42 @@ def test_download_validates_and_resumes_existing_image(tmp_path, monkeypatch):
     )
     assert resumed.status == "skipped"
     assert calls == 1
+
+
+def test_download_dataset_commits_recovered_staging_file_to_wds(tmp_path):
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    url = "https://example.test/recovered.png"
+    pq.write_table(pa.table({"url": [url]}), metadata / "split_1.parquet")
+    candidate = next(downloader.iter_candidates(downloader.DATASETS["seaart-hq"], metadata))
+    staging = tmp_path / "staging"
+    transient = staging / "url-downloads" / "seaart-hq" / f"{candidate.stem}.png"
+    transient.parent.mkdir(parents=True)
+    transient.write_bytes(_png_bytes())
+    args = SimpleNamespace(
+        data_dir=tmp_path / "data",
+        staging_dir=staging,
+        target_shard_bytes=1_048_576,
+        max_samples_per_shard=100,
+        workers=1,
+        retries=0,
+        timeout=1,
+        max_image_mib=1,
+        limit=0,
+        overwrite=False,
+        keep_partials=False,
+        dry_run=False,
+    )
+
+    counters = downloader.download_dataset(
+        downloader.DATASETS["seaart-hq"], metadata, args, {"User-Agent": "test"}
+    )
+
+    root = args.data_dir / "seaart-hq"
+    rows = list(iter_index(root))
+    assert counters == {"discovered": 1, "downloaded": 1, "skipped": 0, "failed": 0}
+    assert is_webdataset(root)
+    assert rows[0]["label"] == "fake"
+    assert rows[0]["generator"] == "seaart"
+    assert ImageRef.from_row(rows[0]).read_bytes({"seaart-hq": str(root)}) == _png_bytes()
+    assert not transient.exists()

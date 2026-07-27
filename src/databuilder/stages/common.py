@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ..config import Config, ConfigError, DatasetConfig
 from ..utils import IMAGE_SUFFIXES
+from ..wds import MATERIALIZED_MARKER, is_webdataset, iter_index
 
 # Materialized layout under runtime.data_dir (in-place local datasets keep their
 # own structure under ds.path):
@@ -20,9 +21,6 @@ from ..utils import IMAGE_SUFFIXES
 
 REAL_NAMES = {"real", "human", "natural", "authentic", "photo", "0"}
 FAKE_NAMES = {"fake", "ai", "aigc", "generated", "synthetic", "1"}
-
-MATERIALIZED_MARKER = ".materialized.json"
-
 
 @dataclass(frozen=True)
 class DatasetLayout:
@@ -45,10 +43,13 @@ def pipeline_datasets(cfg: Config) -> tuple[DatasetConfig, ...]:
 
 
 def dataset_root(cfg: Config, ds: DatasetConfig) -> Path:
-    """Directory that holds this dataset's images (in place for local imagefolders)."""
+    """Root of the canonical WDS, or a legacy in-place imagefolder."""
+    canonical = cfg.runtime.data_dir / ds.name
+    if is_webdataset(canonical) or not ds.in_place:
+        return canonical
     if ds.in_place:
         return Path(ds.path)
-    return cfg.runtime.data_dir / ds.name
+    return canonical
 
 
 def dataset_roots(cfg: Config) -> dict[str, str]:
@@ -193,3 +194,31 @@ def iter_dataset_images(root: Path, ds: DatasetConfig) -> Iterator[Path]:
     for path in sorted(root.rglob("*")):
         if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES:
             yield path
+
+
+def iter_dataset_records(cfg: Config, ds: DatasetConfig) -> Iterator[dict]:
+    """Yield image metadata plus a loose-file or tar-member locator."""
+    root = dataset_root(cfg, ds)
+    if is_webdataset(root):
+        yield from iter_index(root)
+        return
+    layout = load_layout(cfg, ds)
+    for abs_path in iter_dataset_images(root, ds):
+        rel = f"{ds.name}/{str(abs_path.relative_to(root)).replace(chr(92), '/')}"
+        label, generator = resolve_meta(ds, tuple(Path(rel).parts[1:]), layout)
+        yield {
+            "path": rel,
+            "dataset": ds.name,
+            "label": label,
+            "generator": generator,
+            "source_split": "",
+            "shard": "",
+            "member": "",
+            "offset": 0,
+            "size": abs_path.stat().st_size,
+            "extension": abs_path.suffix.lower(),
+        }
+
+
+def archived_row(row: dict) -> bool:
+    return bool(row.get("shard"))

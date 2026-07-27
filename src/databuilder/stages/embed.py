@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import logging
 import multiprocessing as mp
 from dataclasses import dataclass
@@ -8,7 +9,8 @@ import numpy as np
 
 from ..state import RunContext
 from ..utils import iter_parquet_batches, owns
-from .common import dataset_roots, resolve_abs_from_roots
+from ..wds import read_image_bytes
+from .common import dataset_roots
 from .headerscan import _init_worker as _init_image_plugins
 
 log = logging.getLogger("databuilder.embed")
@@ -249,7 +251,10 @@ def _run_daft(ctx: RunContext, survivors) -> None:
         ctx.rank, cfg.daft.runner, concurrency, use_gpu,
     )
 
-    df = daft.read_parquet(str(survivors)).select("image_id", "path")
+    locator_columns = [
+        "image_id", "path", "dataset", "shard", "member", "offset", "size"
+    ]
+    df = daft.read_parquet(str(survivors)).select(*locator_columns)
     if cfg.daft.runner != "ray" and ctx.world_size > 1:
         owns_row = make_owns_udf(daft, ctx.rank, ctx.world_size)
         df = df.where(owns_row(col("path")))
@@ -372,16 +377,17 @@ def _embed_worker(spec: _WorkerSpec) -> None:
         images.clear()
 
     owned_index = 0
-    for batch in iter_parquet_batches(spec.survivors_path, columns=["image_id", "path"]):
+    columns = ["image_id", "path", "dataset", "shard", "member", "offset", "size"]
+    for batch in iter_parquet_batches(spec.survivors_path, columns=columns):
         for row in batch.to_pylist():
             if not owns(row["path"], spec.rank, spec.world_size):
                 continue
             owned_index += 1
             if (owned_index - 1) % spec.device_count != spec.device_index:
                 continue
-            abs_path = resolve_abs_from_roots(spec.roots, row["path"])
             try:
-                with Image.open(abs_path) as img:
+                data = read_image_bytes(row, spec.roots)
+                with Image.open(io.BytesIO(data)) as img:
                     images.append(img.convert("RGB"))
             except Exception:  # noqa: BLE001 - unreadable at embed time
                 skipped += 1

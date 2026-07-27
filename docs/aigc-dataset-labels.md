@@ -5,12 +5,13 @@ image and “fake” means an AI-generated or AI-manipulated image.
 
 It does not turn URL fields into per-image HTTP requests. URL-only, metadata-only, or
 provenance-ambiguous repositories therefore use `download_only = true`: their
-snapshot is retained but they cannot silently enter the labelled manifest.
+selected repository files are kept as a raw tar, not a snapshot tree, and they
+cannot silently enter the labelled manifest.
 
 | Dataset | Labels admitted to manifest | Generator/provenance rule | Handling note |
 |---|---|---|---|
 | [terminusresearch/nijijourney-v6-520k-raw](https://huggingface.co/datasets/terminusresearch/nijijourney-v6-520k-raw) | fake only | `nijijourney-v6` | Generated-image tar archives. |
-| [terminusresearch/midjourney-v6-520k-raw](https://huggingface.co/datasets/terminusresearch/midjourney-v6-520k-raw) | fake only | `midjourney-v6` | Generated-image tar archives. |
+| [terminusresearch/midjourney-v6-520k-raw](https://huggingface.co/datasets/terminusresearch/midjourney-v6-520k-raw) | fake only | `midjourney-v6` | Numbered files are chunks of one tar stream; `multipart_tar` reads across chunk boundaries. |
 | [bitmind/GenImage_MidJourney](https://huggingface.co/datasets/bitmind/GenImage_MidJourney) | fake only | `midjourney` | MidJourney subset of GenImage. |
 | [Ashenone3/Midjourney-23M](https://huggingface.co/datasets/Ashenone3/Midjourney-23M) | fake only | `midjourney` | WebDataset image tars. |
 | [Photoroom/midjourney-v6-recap](https://huggingface.co/datasets/Photoroom/midjourney-v6-recap) | fake only | `midjourney-v6` | Generated-image parquet. |
@@ -40,8 +41,8 @@ snapshot is retained but they cannot silently enter the labelled manifest.
 | [Yejy53/Nano-consistent-150k](https://huggingface.co/datasets/Yejy53/Nano-consistent-150k) | fake only | `nano-banana` | The card is empty; this is an explicit, provisional inference from the repository name/layout. |
 | [JamalLee/pre-2026](https://huggingface.co/datasets/JamalLee/pre-2026) | real and fake | `generator` column | The alias redirects to `JamalLee/Omni-Fake-SET`. Only its image parquet subset is selected; `real` stays real while `full_synthetic` and `tampered` map to fake. |
 | [lingcco/FakeClue](https://huggingface.co/datasets/lingcco/FakeClue) | fake only | `fakeclue` | Train/test archives contain the generated benchmark images. |
-| [kafked/anycrap](https://huggingface.co/datasets/kafked/anycrap) | none in the main config (raw snapshot) | generated output metadata | `image_url` is external. The standalone `scripts/download_url_datasets.py` selects rows with `has_real_image = true`; downloaded outputs remain fake-labelled. |
-| [lehduong/seaart-hq](https://huggingface.co/datasets/lehduong/seaart-hq) | none in the main config (raw snapshot) | `seaart` output metadata | Parquet rows contain external `url` values. The standalone URL downloader can fetch them without changing the main config. |
+| [kafked/anycrap](https://huggingface.co/datasets/kafked/anycrap) | none in the main config (raw tar) | generated output metadata | `image_url` is external. The standalone `scripts/download_url_datasets.py` selects rows with `has_real_image = true`; downloaded outputs remain fake-labelled. |
+| [lehduong/seaart-hq](https://huggingface.co/datasets/lehduong/seaart-hq) | none in the main config (raw tar) | `seaart` output metadata | Parquet rows contain external `url` values. The standalone URL downloader can fetch them without changing the main config. |
 | [dsixteen/Niji_1_11](https://huggingface.co/datasets/dsixteen/Niji_1_11) | fake only | `niji` | Generated-image parquet. |
 | [EricY05/lvlm-ood-fake-data](https://huggingface.co/datasets/EricY05/lvlm-ood-fake-data) | real and fake | static `lvlm-ood` group | `id_real`/`ood_real` map to real; `fake_id`/`fake_ood` map to fake. |
 | [ThaneJoss/SDAIE](https://huggingface.co/datasets/ThaneJoss/SDAIE) | real and fake | subset generator columns/static source | Four disjoint config entries avoid duplicate payloads: `aigi_test` and `cnnspot_trainset` use their label/generator columns; `exif_pretrain` and `photographic_10k` are real-only. |

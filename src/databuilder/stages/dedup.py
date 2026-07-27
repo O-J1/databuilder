@@ -7,7 +7,7 @@ import pyarrow as pa
 
 from ..state import RunContext
 from ..utils import ParquetShardWriter, iter_parquet_batches
-from .common import dataset_roots, protected_datasets, resolve_abs_from_roots
+from .common import archived_row, dataset_roots, protected_datasets, resolve_abs_from_roots
 from .fingerprint import FINGERPRINT_SCHEMA
 
 log = logging.getLogger("databuilder.dedup")
@@ -125,7 +125,11 @@ def run(ctx: RunContext) -> None:
                         "kept_image_id": kept_id,
                     }
                 )
-                if not keep_files and row["dataset"] not in protected:
+                if (
+                    not keep_files
+                    and not archived_row(row)
+                    and row["dataset"] not in protected
+                ):
                     ctx.remove_file(resolve_abs_from_roots(roots, row["path"]))
 
     log.info(

@@ -2,14 +2,22 @@
 
 [runtime]
 work_dir = "/shared/aigc-build/work"     # shared FS on multi-node runs
-data_dir = "/shared/aigc-build/data"     # materialized images live here
+data_dir = "/shared/aigc-build/data"     # canonical tar/WebDataset output lives here
 num_workers = 16
 world_size = 8                            # or pass --world-size / WORLD_SIZE / SLURM_NTASKS
 rank = 0                                  # or pass --rank / RANK / SLURM_PROCID
 
 [download]
 max_workers = 1              # rank 0 only; HF/Xet owns transfer resume state
-xet_high_performance = false # opt in to saturating rank 0's CPU/disk/network
+# staging_dir = "/separate/filesystem/databuilder-staging"
+retain_snapshots = false
+retain_xet_cache = false
+
+[storage]
+backend = "webdataset"
+target_shard_bytes = 3000000000 # WebDataset ShardWriter performance default
+max_samples_per_shard = 100000
+compact_after_manifest = false  # enable to physically remove rejects after manifest
 
 [filters]
 min_longest_side = 256      # delete when the longest side is smaller
@@ -90,9 +98,8 @@ image_dir = "imgs"            # set when auto-detection cannot find the images
 label = "real"
 generator = "none"
 
-# Local imagefolder datasets are scanned in place and their files are NEVER
-# deleted by default; rejects/duplicates are only recorded in the artifacts.
-# Set allow_delete = true to let filters/dedup physically delete originals.
+# Local imagefolder datasets are packed into data_dir WebDataset shards. Source
+# files remain unless allow_delete = true.
 [[datasets]]
 name = "my-local-photos"
 path = "/data/my-photos"
@@ -101,11 +108,9 @@ label = "folder"
 generator = "folder"
 allow_delete = false
 
-# Local filesystem dataset, scanned IN PLACE (filter/dedup deletions affect the
-# originals -- use --dry-run first). Folder names serve as labels: segments
-# named real/fake/generated/ai/aigc (or label_map entries) are matched up to
-# two levels deep, and the run FAILS IMMEDIATELY at startup if no label
-# folders can be inferred.
+# Folder names serve as labels: segments named real/fake/generated/ai/aigc (or
+# label_map entries) are matched up to two levels deep, and the run fails at
+# startup if no label folders can be inferred. The source tree remains intact.
 [[datasets]]
 name = "local-mixed"
 path = "D:/aigc-dataset/mixed"    # e.g. mixed/real/... and mixed/fake/sd15/...

@@ -15,13 +15,13 @@ pip install -e "./databuilder[viz]"    # + FastAPI/uvicorn/umap for the viewer
 
 | # | Stage        | Scope     | What it does |
 |---|--------------|-----------|--------------|
-| 1 | `download`   | rank 0    | one-worker HF/Xet snapshots + format-aware materialization |
-| 2 | `headerscan` | per node  | delete: longest side < min, broken headers, aspect beyond 9:23 / 23:9, broken files |
+| 1 | `download`   | rank 0    | one-worker HF/Xet snapshot, streamed into canonical WebDataset shards |
+| 2 | `headerscan` | per node  | reject: longest side < min, broken headers, aspect beyond 9:23 / 23:9 |
 | 3 | `fingerprint`| per node* | one decode: Laplacian filter + xxh3 + phash (12x12) + colorhash |
-| 4 | `dedup`      | rank 0    | global exact + near-duplicate delete (keep highest res, then largest file) |
+| 4 | `dedup`      | rank 0    | global exact + near-duplicate selection (keep highest res, then largest file) |
 | 5 | `embed`      | per node* | DINOv3 embeddings -> parquet shards (fp16) per GPU |
 | 6 | `cluster`    | rank 0    | usearch/sklearn k-means; flag over-represented members (never deletes) |
-| 7 | `manifest`   | rank 0    | balanced manifest; parquet always, CSV refused above 1M rows |
+| 7 | `manifest`   | rank 0    | balanced manifest; optionally compact shards to final survivors |
 
 \* With `[daft] enabled = true` and `runner = "ray"`, fingerprint and embed run
 from rank 0 on a Ray cluster instead (see [Daft execution path](#daft-execution-path)).
@@ -159,12 +159,18 @@ session; nothing is exposed to the internet and no firewall changes are made.
 See [examples/build.example.toml](examples/build.example.toml). Key sections:
 
 - `[runtime]` - `work_dir`, `data_dir`, `num_workers`, `world_size`/`rank`
-- `[download]` - Hugging Face `snapshot_download` concurrency. It defaults to
-  `max_workers = 1`, so snapshots run sequentially on rank 0 and rely on
-  HF/Xet for partial-transfer resume. Xet's range and cache-size settings stay
-  at Hugging Face defaults. Set `xet_high_performance = true` to let Xet
-  maximize rank 0's CPU, disk, and network use. Databuilder does not implement
-  per-file HF transfers or its own download resume ledger.
+- `[download]` - Hugging Face `snapshot_download` concurrency and ephemeral
+  staging. `max_workers = 1` means one dataset-file transfer at a time on rank
+  0; all other ranks wait and never contact Hugging Face. `staging_dir` can be
+  placed on a filesystem with enough temporary capacity. Xet owns transfer
+  resume and all transfer tuning remains at the user/Hugging Face defaults;
+  databuilder only points `HF_XET_CACHE` at staging. Successful conversion
+  removes snapshots and Xet cache unless `retain_snapshots` or
+  `retain_xet_cache` is explicitly enabled.
+- `[storage]` - canonical `webdataset` output. The default limits—3,000,000,000
+  bytes or 100,000 samples per shard—match WebDataset's performance-oriented
+  `ShardWriter` defaults. `compact_after_manifest = true` rewrites shards to
+  contain only final manifest rows and bounds temporary space to one shard.
 - `[filters]` - `min_longest_side`, `max_tall = "9:23"`, `max_wide = "23:9"`, `laplacian_min/max`
 - `[dedup]` - `phash_size = 12`, `phash_max_hamming`, `colorhash_max_hamming`
 - `[embedding]` - DINOv3 `model` id (any size), `batch_size`, `devices = "auto"`,
@@ -193,19 +199,63 @@ See [examples/build.example.toml](examples/build.example.toml). Key sections:
   Arrow, JSONL with local image paths, zip, tar/WebDataset, concatenated
   `multipart_tar` chunks, split zip, imagefolder, and `raw`. External image
   URLs are never fetched individually.
-  `download_only = true` with `format = "raw"` retains a snapshot but excludes
-  it from headerscan and every downstream manifest stage. `source_split` picks
+  `download_only = true` with `format = "raw"` stores the selected repository
+  files in a tar but excludes it from headerscan and every downstream stage.
+  `source_split` picks
   the HF split to download; `assign_split = "test"` forces
   the whole dataset into one output split (forced val/test bypass balancing
   caps and cluster pruning).
 
 The requested 40-repository corpus is ready in
 [`examples/aigc-datasets.toml`](examples/aigc-datasets.toml). It pins every
-revision, writes snapshots and caches only below
+revision, writes only canonical tar/WebDataset output below
 `/p/data1/datasets/mmlaion/aigc/data`, selects generated outputs (not source
-references) from UniPic, and preserves ambiguous or URL-only repositories as
-raw snapshots. The card/schema audit and real/fake decisions are recorded in
+references) from UniPic, and preserves URL-only repositories as raw tar
+archives. Its snapshot/Xet staging is configured separately and is removed
+after successful conversion. The card/schema audit and real/fake decisions are recorded in
 [`docs/aigc-dataset-labels.md`](docs/aigc-dataset-labels.md).
+
+### Canonical storage and offline migration
+
+Materialized image datasets contain uncompressed tar shards under `shards/`.
+Each WebDataset sample is a stable `<image-id>.<extension>` plus
+`<image-id>.json` pair. `index.parquet` maps the existing logical image path
+to its shard, member, byte offset, size, label, generator, and source split;
+`dataset.json` is the shard descriptor. Headerscan, fingerprint, Daft,
+embedding, manifests, and the viewer read those byte ranges directly. They do
+not reconstruct JPEG/PNG trees.
+
+Existing JSC data can be converted without any Hugging Face request:
+
+```bash
+databuilder storage inventory --config examples/aigc-datasets.toml
+databuilder storage migrate --existing-only --config examples/aigc-datasets.toml
+databuilder storage inventory --config examples/aigc-datasets.toml
+```
+
+Migration consumes whatever is already local: completed or partial loose
+materializations, legacy `.hf_snapshots`, configured staging snapshots, and
+local filesystem sources. A loose source image is removed only after its
+containing shard has been closed, validated, fsynced, and committed. Existing
+snapshots and Xet cache are removed after the dataset marker is committed.
+Rows reported as `needs_download` are left untouched; `storage migrate` never
+calls Hugging Face. Regular `databuilder run` also auto-packs a completed
+legacy loose dataset before considering a download.
+
+If the old `work_dir` already contains downstream `SUCCESS` markers, point the
+next run at a fresh `work_dir`; stage artifacts written before this storage
+schema do not contain shard locators. The committed dataset markers still
+prevent any re-download.
+
+With `compact_after_manifest = true` (enabled in the AIGC config), filtering,
+deduplication, clustering, and balancing first operate as metadata decisions.
+The manifest stage then rewrites each shard once with only selected samples and
+updates all offsets in `manifest.parquet`. To compact an already-built
+manifest manually:
+
+```bash
+databuilder storage compact --config examples/aigc-datasets.toml
+```
 
 ### URL-backed image datasets
 
@@ -215,7 +265,8 @@ be downloaded independently with:
 
 ```bash
 python scripts/download_url_datasets.py \
-  --data-dir /p/data1/datasets/mmlaion/aigc/data \
+  --data-dir ./data \
+  --staging-dir ./databuilder-staging \
   --workers 16
 ```
 
@@ -223,26 +274,39 @@ Use `--dataset anycrap` or `--dataset seaart-hq` to select one source,
 `--limit 100 --dry-run` to inspect its metadata count, and
 `--skip-metadata-snapshot` to make no Hugging Face call when the pinned
 metadata snapshot is already present. Downloads are streamed, size-limited,
-decoded before acceptance, atomically renamed, and skipped on rerun when the
-URL-derived destination already exists. Success and failure JSONL logs are
-written beside the images under `<data-dir>/<dataset>/url-images/`.
+decoded before acceptance, then committed into the same 3 GB/100k-sample
+WebDataset layout. Validated temporary images are deleted after their shard is
+committed; an interrupted run reuses them. Metadata snapshots and Xet cache
+are removed after success. Only the compact `url-downloads.jsonl` and
+`url-failures.jsonl` logs remain beside the shard index—there is no loose
+`url-images/` tree.
 
-This standalone download does not change `download_only = true` in the main
-config. To feed the downloaded images into a later build, add their
-`url-images` directory as a local `imagefolder` dataset with static
-`label = "fake"` and the appropriate generator (`anycrap` or `seaart`).
+This standalone download does not edit the TOML. To admit a successfully
+downloaded URL dataset to a later build, change that existing entry from
+`format = "raw"`/`download_only = true` to `format = "webdataset"`, remove
+`download_only`, and retain its static `label = "fake"` and generator. The
+committed storage marker makes the download stage reuse the shards.
 
 ### Local filesystem datasets
 
-Local `imagefolder` datasets are scanned **in place** and manifest rows use
-absolute paths. Their files are **never deleted by default**: filter and dedup
-rejects are only recorded in the run artifacts. Set `allow_delete = true` on a
-dataset to let the pipeline physically delete originals (run `--dry-run`
-first!). With `label = "folder"`, label folders (`real`, `fake`,
+New local `imagefolder` datasets are packed into canonical shards. Their source
+files remain untouched unless `allow_delete = true`; legacy in-place datasets
+are still readable under the same protection rule. With
+`label = "folder"`, label folders (`real`, `fake`,
 `generated`, `ai`, `aigc`, or `label_map` entries) are matched up to two levels
 deep, and the run fails immediately at startup when none can be inferred.
-Local `parquet`/`zip` sources are materialized into `data_dir` (bytes must be
-extracted); the local source files are never deleted.
+Local parquet/archive sources are streamed into `data_dir` shards; the local
+source files are never deleted.
+
+## Canonical data layout (`data_dir`)
+
+```text
+<dataset>/shards/<dataset>-NNNNNN.tar  image + JSON WebDataset samples
+<dataset>/index.parquet                logical paths, labels, and byte ranges
+<dataset>/dataset.json                 shard list and sizes
+<dataset>/.materialized.json           committed storage state
+<raw-dataset>/raw/<dataset>.tar        download-only repository payload
+```
 
 ## Artifacts layout (`work_dir`)
 
@@ -257,5 +321,8 @@ artifacts/manifest/manifest.parquet   final balanced manifest (+ .csv when <= 1M
 viz/viz.parquet                       sampled 2D projection for the viewer
 ```
 
-Deletion policy: filter and dedup stages hard-delete files (use `--dry-run`
-first); cluster pruning only flags rows and never touches files.
+Deletion policy: archive-backed filter/dedup rejects are metadata-only until
+manifest compaction; compaction physically removes every row not selected for
+the final manifest. Legacy loose and explicitly deletable in-place sources
+retain the old immediate-delete behavior. Cluster pruning itself only flags
+rows.
