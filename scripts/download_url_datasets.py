@@ -18,8 +18,10 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -126,6 +128,31 @@ def _nonnegative_int(text: str) -> int:
     return value
 
 
+def _nonnegative_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value) or value < 0:
+        raise argparse.ArgumentTypeError("must be a finite number at least 0")
+    return value
+
+
+class RequestRateLimiter:
+    """Globally space HTTP request starts across all download workers."""
+
+    def __init__(self, delay_seconds: float) -> None:
+        self.delay_seconds = delay_seconds
+        self._lock = threading.Lock()
+        self._next_start = 0.0
+
+    def wait(self) -> None:
+        if self.delay_seconds <= 0:
+            return
+        with self._lock:
+            remaining = self._next_start - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+            self._next_start = time.monotonic() + self.delay_seconds
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -149,6 +176,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="dataset to process; repeat as needed (default: both)",
     )
     parser.add_argument("--workers", type=_positive_int, default=16)
+    parser.add_argument(
+        "--request-delay",
+        type=_nonnegative_float,
+        default=2.0,
+        metavar="SECONDS",
+        help=(
+            "minimum delay between HTTP request starts across all workers "
+            "(default: 2; use 0 to disable)"
+        ),
+    )
     parser.add_argument("--retries", type=_nonnegative_int, default=4)
     parser.add_argument("--timeout", type=_positive_int, default=60)
     parser.add_argument(
@@ -370,6 +407,7 @@ def download_one(
     max_bytes: int,
     overwrite: bool,
     keep_partials: bool,
+    rate_limiter: RequestRateLimiter | None = None,
 ) -> DownloadResult:
     output_dir.mkdir(parents=True, exist_ok=True)
     existing = _existing_image(output_dir, candidate.stem)
@@ -381,6 +419,8 @@ def download_one(
     for attempt in range(attempts):
         caught: Exception | None = None
         try:
+            if rate_limiter is not None:
+                rate_limiter.wait()
             request = urllib.request.Request(candidate.url, headers=headers)
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 content_length = response.headers.get("Content-Length")
@@ -445,6 +485,7 @@ def download_dataset(
     metadata_root: Path,
     args: argparse.Namespace,
     headers: dict[str, str],
+    rate_limiter: RequestRateLimiter | None = None,
 ) -> dict[str, int]:
     staging = getattr(args, "staging_dir", None) or (args.data_dir / ".databuilder-staging")
     output_dir = staging / "url-downloads" / spec.name
@@ -470,6 +511,9 @@ def download_dataset(
     failures_path = target / "url-failures.jsonl"
     counters = {"discovered": 0, "downloaded": 0, "skipped": 0, "failed": 0}
     max_pending = max(args.workers * 4, args.workers)
+    rate_limiter = rate_limiter or RequestRateLimiter(
+        getattr(args, "request_delay", 2.0)
+    )
     writer = DatasetShardWriter(
         target,
         spec.name,
@@ -538,6 +582,7 @@ def download_dataset(
                     args.max_image_mib * 1024 * 1024,
                     args.overwrite,
                     args.keep_partials,
+                    rate_limiter,
                 )
             )
             if len(pending) >= max_pending:
@@ -589,6 +634,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     selected = args.dataset or list(DATASETS)
+    rate_limiter = RequestRateLimiter(args.request_delay)
+    LOG.info(
+        "spacing HTTP request starts by at least %.2f seconds across %d workers",
+        args.request_delay,
+        args.workers,
+    )
     overall_failed = 0
     for name in selected:
         spec = DATASETS[name]
@@ -599,7 +650,9 @@ def main(argv: list[str] | None = None) -> int:
                 args.skip_metadata_snapshot,
                 args.staging_dir,
             )
-            counters = download_dataset(spec, metadata_root, args, headers)
+            counters = download_dataset(
+                spec, metadata_root, args, headers, rate_limiter
+            )
         except (FileNotFoundError, ValueError) as exc:
             LOG.error("%s: %s", name, exc)
             overall_failed += 1

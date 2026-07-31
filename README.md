@@ -267,7 +267,8 @@ be downloaded independently with:
 python scripts/download_url_datasets.py \
   --data-dir ./data \
   --staging-dir ./databuilder-staging \
-  --workers 16
+  --workers 16 \
+  --request-delay 2
 ```
 
 Use `--dataset anycrap` or `--dataset seaart-hq` to select one source,
@@ -279,7 +280,8 @@ WebDataset layout. Validated temporary images are deleted after their shard is
 committed; an interrupted run reuses them. Metadata snapshots and Xet cache
 are removed after success. Only the compact `url-downloads.jsonl` and
 `url-failures.jsonl` logs remain beside the shard index—there is no loose
-`url-images/` tree.
+`url-images/` tree. HTTP request starts are globally spaced by two seconds
+across all workers by default; set `--request-delay 0` to disable the delay.
 
 This standalone download does not edit the TOML. To admit a successfully
 downloaded URL dataset to a later build, change that existing entry from

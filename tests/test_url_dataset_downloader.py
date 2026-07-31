@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 from PIL import Image
 
 from databuilder.wds import ImageRef, is_webdataset, iter_index
@@ -50,6 +51,30 @@ def test_seaart_candidates_stream_parquet(tmp_path):
     candidates = list(downloader.iter_candidates(downloader.DATASETS["seaart-hq"], tmp_path))
     assert len(candidates) == 1
     assert candidates[0].url == "https://example.test/a.webp"
+
+
+def test_request_rate_limiter_globally_spaces_starts(monkeypatch):
+    now = [100.0]
+    sleeps = []
+
+    monkeypatch.setattr(downloader.time, "monotonic", lambda: now[0])
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(downloader.time, "sleep", fake_sleep)
+    limiter = downloader.RequestRateLimiter(2.0)
+
+    limiter.wait()
+    limiter.wait()
+    now[0] += 0.5
+    limiter.wait()
+
+    assert sleeps == [2.0, 1.5]
+    assert downloader.parse_args([]).request_delay == 2.0
+    with pytest.raises(SystemExit):
+        downloader.parse_args(["--request-delay", "nan"])
 
 
 def test_download_validates_and_resumes_existing_image(tmp_path, monkeypatch):
