@@ -15,9 +15,11 @@ import pytest
 
 from databuilder.config import ConfigError, DatasetConfig, DownloadConfig, ImageColumnConfig
 from databuilder.stages import download
-from databuilder.stages.common import MATERIALIZED_MARKER, load_layout, pipeline_datasets
+from databuilder.stages.common import (
+    MATERIALIZED_MARKER, dataset_roots, iter_dataset_records, load_layout, pipeline_datasets,
+)
 from databuilder.stages.download import resolve_columns
-from databuilder.wds import ImageRef, is_webdataset, iter_index
+from databuilder.wds import ImageRef, compact_dataset, is_webdataset, iter_index, read_sample_metadata
 
 
 def _schema(**fields) -> pa.Schema:
@@ -364,3 +366,90 @@ def test_multipart_tar_reads_members_across_chunk_boundaries(tmp_path, make_ctx)
     assert marker["written"] == 2
     assert marker["parts"] == 2
     assert marker["storage"] == "webdataset"
+
+
+@pytest.mark.parametrize("fmt", ["tar", "webdataset", "zip"])
+def test_bucket_paths_sidecars_and_compaction_roundtrip(tmp_path, make_ctx, fmt):
+    source = tmp_path / "source"
+    extension = "zip" if fmt == "zip" else "tar"
+    expected = {}
+    # Differing images with identical member/shard names must not be deduplicated.
+    for bucket, color in (("square", "red"), ("wide", "blue")):
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (300, 300), color).save(buffer, format="PNG")
+        payload = buffer.getvalue()
+        path = source / "buckets" / bucket / f"shard-000000.{extension}"
+        path.parent.mkdir(parents=True)
+        sidecars = {
+            "nested/000000.json": b'{"caption":"original", "label":"source-label"}',
+            "nested/000000.txt": b"caption\r\nwith exact whitespace\n",
+            "unpaired/invalid.json": b"not valid JSON\xff",
+            "unpaired/weights.bin": bytes(range(256)) * 8192,
+        }
+        members = {"nested/000000.png": payload, **sidecars}
+        if fmt == "zip":
+            with zipfile.ZipFile(path, "w") as archive:
+                for name, data in members.items():
+                    archive.writestr(name, data)
+        else:
+            with tarfile.open(path, "w") as archive:
+                for name, data in members.items():
+                    info = tarfile.TarInfo(name)
+                    info.size = len(data)
+                    archive.addfile(info, io.BytesIO(data))
+        logical = f"buckets-test/buckets/{bucket}/{path.name}/nested/000000.png"
+        expected[logical] = (payload, path.relative_to(source).as_posix(), sidecars)
+
+    ds = DatasetConfig(
+        name="buckets-test", path=str(source), format=fmt, label="real", generator="camera"
+    )
+    ctx = make_ctx(datasets=(ds,))
+    download.run(ctx)
+    roots = dataset_roots(ctx.cfg)
+    target = ctx.data_dir / ds.name
+    rows = list(iter_dataset_records(ctx.cfg, ds))
+    assert len(rows) == 2
+    metadata_by_path = {}
+    companion_bytes = {}
+    for row in rows:
+        payload, source_archive, sidecars = expected[row["path"]]
+        assert ImageRef.from_row(row).read_bytes(roots) == payload
+        metadata = read_sample_metadata(row, roots)
+        assert metadata["label"] == "real"
+        provenance = metadata["source_metadata"]
+        assert provenance["source_archive"] == source_archive
+        assert provenance["source_member"] == "nested/000000.png"
+        companion = target / provenance["archive_metadata"]
+        companion_bytes[companion] = companion.read_bytes()
+        with tarfile.open(companion) as archive:
+            actual = {member.name: archive.extractfile(member).read() for member in archive}
+        assert actual == sidecars
+        metadata_by_path[row["path"]] = metadata
+
+    # Manifest compaction must keep provenance and all companion bytes, even
+    # unpaired sidecars and sidecars belonging to removed images.
+    keep = rows[0]["path"]
+    compact_dataset(target, {keep})
+    remaining = list(iter_dataset_records(ctx.cfg, ds))
+    assert len(remaining) == 1
+    assert read_sample_metadata(remaining[0], roots) == metadata_by_path[keep]
+    assert ImageRef.from_row(remaining[0]).read_bytes(roots) == expected[keep][0]
+    assert all(path.read_bytes() == data for path, data in companion_bytes.items())
+
+
+def test_duplicate_tar_image_names_fail_without_complete_marker(tmp_path, make_ctx):
+    source = tmp_path / "source"
+    source.mkdir()
+    with tarfile.open(source / "data.tar", "w") as archive:
+        for _ in range(2):
+            payload = _png_bytes()
+            member = tarfile.TarInfo("duplicate.png")
+            member.size = len(payload)
+            archive.addfile(member, io.BytesIO(payload))
+    ds = DatasetConfig(name="duplicate", path=str(source), format="tar", label="real")
+    ctx = make_ctx(datasets=(ds,))
+    with pytest.raises(ConfigError, match="duplicate image member"):
+        download.run(ctx)
+    assert not (ctx.data_dir / ds.name / MATERIALIZED_MARKER).exists()

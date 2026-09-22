@@ -17,6 +17,7 @@ from ..config import ConfigError, DatasetConfig, ImageColumnConfig
 from ..state import RunContext
 from ..utils import IMAGE_SUFFIXES, normalize_relpath, safe_name, sniff_extension
 from ..wds import (
+    ArchiveMetadataWriter,
     DatasetShardWriter,
     archive_raw_snapshot,
     atomic_json,
@@ -764,15 +765,30 @@ def _materialize_zip(
     if not archives:
         raise ConfigError(f"dataset {ds.name!r}: no zip files under {source_dir}")
     for zip_path in archives:
-        prefix = safe_name(zip_path.stem)
-        with zipfile.ZipFile(zip_path) as archive:
+        prefix = normalize_relpath(zip_path.relative_to(source_dir))
+        with zipfile.ZipFile(zip_path) as archive, ArchiveMetadataWriter(
+            writer.root, prefix
+        ) as sidecars:
+            seen = set()
             for member in archive.infolist():
-                if member.is_dir() or Path(member.filename).suffix.lower() not in IMAGE_SUFFIXES:
-                    continue
                 safe_member = _safe_member_name(member.filename)
                 if safe_member is None:
                     log.warning("skipping unsafe zip entry %r", member.filename)
                     continue
+                if member.is_dir() or Path(member.filename).suffix.lower() not in IMAGE_SUFFIXES:
+                    info = tarfile.TarInfo(member.filename)
+                    info.mode = (member.external_attr >> 16) & 0o777 or 0o644
+                    if member.is_dir():
+                        info.type = tarfile.DIRTYPE
+                        sidecars.add(info)
+                    else:
+                        info.size = member.file_size
+                        with archive.open(member) as src:
+                            sidecars.add(info, src)
+                    continue
+                if safe_member in seen:
+                    raise ConfigError(f"duplicate image member {member.filename!r} in {prefix}")
+                seen.add(safe_member)
                 relative = normalize_relpath(Path(prefix) / safe_member)
                 label, generator = _archive_meta(ds, relative)
                 with archive.open(member) as src:
@@ -782,7 +798,10 @@ def _materialize_zip(
                     f"{ds.name}/{relative}",
                     label,
                     generator,
-                    metadata={"source_archive": zip_path.name, "source_member": member.filename},
+                    metadata={
+                        "source_archive": prefix, "source_member": member.filename,
+                        "archive_metadata": sidecars.relative_path,
+                    },
                 ):
                     written += 1
     return {"format": "zip", "written_from_source": written}
@@ -809,13 +828,11 @@ def _materialize_tar(
         # Some repositories use `split` to cut one tar byte stream into numbered
         # .tar chunks. Present those chunks as one seekable file without writing
         # a second, enormous combined archive to disk.
-        prefix = safe_name(
-            archives[0].name.removesuffix(".tar.gz").removesuffix(".tgz").removesuffix(".tar")
-        )
+        prefix = normalize_relpath(archives[0].relative_to(source_dir))
         joined = _MultipartFile(archives)
         try:
             with tarfile.open(fileobj=joined, mode="r:*") as archive:
-                written += _copy_tar_images(ds, archive, writer, prefix, "multipart_tar")
+                written += _copy_tar_images(ds, archive, writer, prefix, prefix)
         except tarfile.ReadError as exc:
             raise ConfigError(
                 f"dataset {ds.name!r}: concatenated tar stream is unreadable across "
@@ -826,10 +843,12 @@ def _materialize_tar(
         return {"format": fmt, "written_from_source": written, "parts": len(archives)}
 
     for tar_path in archives:
-        stem = tar_path.name.removesuffix(".tar.gz").removesuffix(".tgz").removesuffix(".tar")
+        relative_archive = normalize_relpath(tar_path.relative_to(source_dir))
         try:
             with tarfile.open(tar_path, "r:*") as archive:
-                written += _copy_tar_images(ds, archive, writer, safe_name(stem), tar_path.name)
+                written += _copy_tar_images(
+                    ds, archive, writer, relative_archive, relative_archive
+                )
         except tarfile.ReadError as exc:
             raise ConfigError(
                 f"dataset {ds.name!r}: tar archive {tar_path} is unreadable. "
@@ -847,26 +866,43 @@ def _copy_tar_images(
     source_archive: str,
 ) -> int:
     written = 0
-    for member in archive:
-        if not member.isfile() or Path(member.name).suffix.lower() not in IMAGE_SUFFIXES:
-            continue
-        safe_member = _safe_member_name(member.name)
-        src = archive.extractfile(member)
-        if safe_member is None or src is None:
-            log.warning("skipping unsafe/unreadable tar entry %r", member.name)
-            continue
-        relative = normalize_relpath(Path(prefix) / safe_member)
-        label, generator = _archive_meta(ds, relative)
-        with src:
-            data = copy_stream(src)
-        if writer.add(
-            data,
-            f"{ds.name}/{relative}",
-            label,
-            generator,
-            metadata={"source_archive": source_archive, "source_member": member.name},
-        ):
-            written += 1
+    seen = set()
+    with ArchiveMetadataWriter(writer.root, source_archive) as sidecars:
+        for member in archive:
+            safe_member = _safe_member_name(member.name)
+            if safe_member is None:
+                log.warning("skipping unsafe tar entry %r", member.name)
+                continue
+            if not member.isfile():
+                # Preserve directories and link descriptions without following links.
+                sidecars.add(member)
+                continue
+            src = archive.extractfile(member)
+            if src is None:
+                raise ConfigError(f"unreadable tar entry {member.name!r} in {source_archive}")
+            with src:
+                if Path(member.name).suffix.lower() not in IMAGE_SUFFIXES:
+                    sidecars.add(member, src)
+                    continue
+                if safe_member in seen:
+                    raise ConfigError(
+                        f"duplicate image member {member.name!r} in {source_archive}"
+                    )
+                seen.add(safe_member)
+                relative = normalize_relpath(Path(prefix) / safe_member)
+                label, generator = _archive_meta(ds, relative)
+                data = copy_stream(src)
+            if writer.add(
+                data,
+                f"{ds.name}/{relative}",
+                label,
+                generator,
+                metadata={
+                    "source_archive": source_archive, "source_member": member.name,
+                    "archive_metadata": sidecars.relative_path,
+                },
+            ):
+                written += 1
     return written
 
 

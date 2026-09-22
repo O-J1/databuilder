@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import io
 import json
 import logging
@@ -144,6 +146,69 @@ class ImageRef:
 
 def read_image_bytes(row: Mapping[str, object], roots: Mapping[str, str]) -> bytes:
     return ImageRef.from_row(row).read_bytes(roots)
+
+
+def read_sample_metadata(row: Mapping[str, object], roots: Mapping[str, str]) -> dict:
+    """Read the canonical JSON next to an indexed image, including source provenance."""
+    ref = ImageRef.from_row(row)
+    if not ref.shard:
+        return {}
+    # Canonical shards store the JSON immediately after each image. Read only
+    # that tar header/payload rather than scanning a multi-GB shard per sample.
+    with (Path(roots[ref.dataset]) / ref.shard).open("rb") as handle:
+        handle.seek(ref.offset + _padded(ref.size))
+        info = tarfile.TarInfo.frombuf(handle.read(512), "utf-8", "surrogateescape")
+        expected = f"{Path(ref.member).stem}.json"
+        if info.name != expected or not info.isfile():
+            raise ValueError(f"missing canonical metadata {expected!r} in {ref.shard}")
+        return json.loads(handle.read(info.size))
+
+
+class ArchiveMetadataWriter:
+    """Keep source sidecars byte-for-byte without mixing them with image samples.
+
+    One atomic companion tar per source archive retains non-image members,
+    including JSON that must not overwrite canonical sample JSON. Compaction
+    deliberately leaves these archives intact, including unpaired files.
+    """
+
+    def __init__(self, root: Path, source_archive: str) -> None:
+        key = hashlib.sha256(source_archive.encode("utf-8")).hexdigest()
+        self.relative_path = f"metadata/{key}.tar"
+        self.path = root / self.relative_path
+        self.partial = self.path.with_suffix(".tar.partial")
+        self.source_archive = source_archive
+        self.members = 0
+        self.size = 0
+
+    def __enter__(self) -> "ArchiveMetadataWriter":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = self.partial.open("w+b")
+        self.archive = tarfile.open(fileobj=self.handle, mode="w", format=tarfile.PAX_FORMAT)
+        return self
+
+    def add(self, member: tarfile.TarInfo, stream=None) -> None:
+        self.archive.addfile(copy.copy(member), stream)
+        self.members += 1
+        self.size += member.size
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        try:
+            self.archive.close()
+            self.handle.flush()
+            os.fsync(self.handle.fileno())
+        finally:
+            self.handle.close()
+        if exc_type is not None:
+            self.partial.unlink(missing_ok=True)
+            return
+        self.partial.replace(self.path)
+        atomic_json(self.path.with_suffix(".json"), {
+            "source_archive": self.source_archive,
+            "archive": self.relative_path,
+            "members": self.members,
+            "payload_bytes": self.size,
+        })
 
 
 def image_media_type(row: Mapping[str, object]) -> str:
@@ -676,13 +741,17 @@ def _write_compact_tar(path: Path, rows: list[dict], root: Path) -> list[dict]:
                 offset = handle.tell() + 512
                 archive.addfile(info, io.BytesIO(data))
                 key = Path(str(row["member"])).stem
-                metadata = json.dumps(
+                sample_metadata = read_sample_metadata(row, roots)
+                sample_metadata.update(
                     {
                         "__key__": key, "image_id": str(row["image_id"]),
                         "path": row["path"], "dataset": row["dataset"],
                         "label": row["label"], "generator": row["generator"],
                         "source_split": row.get("source_split") or "",
-                    },
+                    }
+                )
+                metadata = json.dumps(
+                    sample_metadata,
                     ensure_ascii=False, separators=(",", ":"),
                 ).encode("utf-8")
                 meta = tarfile.TarInfo(f"{key}.json")

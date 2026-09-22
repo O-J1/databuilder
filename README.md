@@ -225,6 +225,24 @@ to its shard, member, byte offset, size, label, generator, and source split;
 embedding, manifests, and the viewer read those byte ranges directly. They do
 not reconstruct JPEG/PNG trees.
 
+Tar/zip image paths include the full repository-relative archive name (including
+its extension), followed by the member path. For example,
+`dataset/buckets/wide/shard-000000.tar/nested/000000.png` stays distinct from
+the same member in another bucket. Canonical sample JSON records the original
+`source_archive` and `source_member` under `source_metadata`.
+
+Non-image archive members, including JSON/text sidecars, invalid JSON, binary
+attachments, and unpaired metadata, are retained byte-for-byte in
+`metadata/<archive-id>.tar`. The matching `.json` descriptor records the source
+archive, member count, and payload size. Each image's
+`source_metadata.archive_metadata` points to its companion tar. Source JSON is
+kept separate from canonical sample JSON so source fields cannot overwrite
+databuilder's labels or provenance. Tar directory/link entries are retained
+without following links; unsafe member paths are skipped with a warning.
+Compaction preserves sample provenance and leaves companion archives intact,
+including metadata for removed images. `databuilder.wds.read_sample_metadata`
+reads the canonical JSON for an indexed image without scanning the whole shard.
+
 Existing JSC data can be converted without any Hugging Face request:
 
 ```bash
@@ -288,6 +306,108 @@ downloaded URL dataset to a later build, change that existing entry from
 `format = "raw"`/`download_only = true` to `format = "webdataset"`, remove
 `download_only`, and retain its static `label = "fake"` and generator. The
 committed storage marker makes the download stage reuse the shards.
+
+### Private Data Archetype archive sample
+
+Private `data-archetype` repositories are added through a generated config so
+their current commit SHA and chosen archive are pinned without committing
+private API output. The audit uses repository metadata only: it lists paths,
+sizes, and Git/LFS/Xet identities, but never opens or downloads a repository
+file. It excludes the lower-value `data_v2_512`, `large_p_half_1024`, and
+`vef_subset_1024` variants, treats the numbered movie-scene and PN-HQ sources
+as separate batches, and chooses the smallest standalone tar/zip archive from
+each of the remaining 14 repositories. Byte-identical chosen archives are
+admitted once.
+
+Run the audit on a machine that can access the private repositories:
+
+```bash
+export HF_TOKEN=hf_read_only_token
+python scripts/audit_private_hf_datasets.py \
+  --output .manual/private-hf/audit.json
+```
+
+Generate and inspect the combined config without transferring payloads:
+
+```bash
+python scripts/download_private_hf_datasets.py \
+  --audit .manual/private-hf/audit.json \
+  --base-config examples/aigc-datasets.toml \
+  --output-config .manual/private-hf/aigc-datasets.toml \
+  --work-dir /p/data1/datasets/mmlaion/aigc/data/.databuilder-work-data-archetype
+```
+
+Add `--download` to materialize exactly the pinned archive from each eligible
+private source. Downloads are sequential and resumable; a committed dataset
+marker prevents the same archive being transferred again. A failed or
+unreadable archive is reported without trying another archive, and processing
+continues with the remaining sources.
+
+The base config may already contain audited entries (for example, the
+private-only `audit.toml`). Matching entries are reused, and only missing
+entries are appended. If an existing name has different settings, generation
+reports the conflicting fields so you can reconcile it with the audit.
+
+For a one-archive trial of a full private config, use `--trial-dir`. This
+creates a separate config containing only audited sources, narrows each source
+to its chosen archive, and preserves the base's other dataset settings. It
+overrides data/work/staging paths into the trial directory and retains source
+snapshots for comparison with the converted WebDataset output:
+
+```bash
+python scripts/download_private_hf_datasets.py \
+  --audit audit.json --base-config audit-finalised.toml \
+  --output-config .manual/private-hf/trial-v1/config.toml \
+  --trial-dir .manual/private-hf/trial-v1 --download
+```
+
+Omit `--download` to inspect the trial config first. Set `HF_TOKEN` in the
+environment when downloading. Trial mode keeps the full config unchanged;
+its completion markers and converted data live separately from a full build.
+Keep the entire trial directory, including `staging/.hf_snapshots`, for the
+subsequent source/output audit. `download-results.json` records each source's
+result. Use a fresh trial directory for a new verification attempt after
+changing conversion behavior; existing completed outputs are reused.
+
+If a pinned private revision is no longer accessible, re-audit only the affected
+repositories with the account/token that can access them. This metadata-only
+command produces a separate audit and full config; it preserves all other pins
+and the full archive patterns rather than switching downloads to `main`:
+
+```bash
+python scripts/audit_private_hf_datasets.py \
+  --refresh-from audit.json \
+  --repo data-archetype/data_v2_1024 --repo data-archetype/pn_hq3_1024 \
+  --output .manual/private-hf/audit-refreshed.json \
+  --base-config audit-finalised.toml --output-config audit-finalised-refreshed.toml
+```
+
+Use those two refreshed files as `--audit` and `--base-config` for the next
+trial. If the metadata request fails too, check repository access for the
+active credential; a replacement commit cannot be inferred from a 404.
+
+```bash
+python scripts/download_private_hf_datasets.py \
+  --audit .manual/private-hf/audit.json \
+  --output-config .manual/private-hf/aigc-datasets.toml \
+  --work-dir /p/data1/datasets/mmlaion/aigc/data/.databuilder-work-data-archetype \
+  --download
+```
+
+Use the generated config—not the base example—for every subsequent pipeline
+stage:
+
+```bash
+databuilder run --config .manual/private-hf/aigc-datasets.toml
+```
+
+The fresh `work_dir` is required because success markers from an earlier build
+would otherwise make downstream stages reuse artifacts that predate the new
+sources. The `data_dir` is preserved, so all previously committed datasets are
+reused. `HF_TOKEN` is read only from the environment and is never stored in the
+audit report or generated TOML. Metadata identities cannot reveal renamed,
+resized, or repackaged duplicate images; the normal fingerprint/dedup stages
+handle that residual overlap after the selected archives are materialized.
 
 ### Local filesystem datasets
 

@@ -18,3 +18,9 @@ logs/
 *.csv
 *.egg-info
 .tmp*/
+*.toml
+*.json
+scripts/private_hf_common.py
+scripts/download_private_hf_datasets.py
+scripts/audit_private_hf_datasets.py
+tests/test_private_hf_datasets.py
